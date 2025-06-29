@@ -10,7 +10,7 @@ git commit -m "Initial commit"
 
 # 현재 브랜치의 이름을 new로 바꾼다 브랜치 이름을 바꾸고 싶을 때
 
-git branch -M new
+git branch -M main
 
 # feature/login이라는 새 브랜치를 만들고 이동한다 새로운 브랜치를 만들 때
 
@@ -29,6 +29,7 @@ git push -u origin feature/login
 git init
 git add .
 git commit -m "Initial commit"
+git branch -M main
 git remote add origin https://github.com/username/repo.git
 git push -u origin main
 

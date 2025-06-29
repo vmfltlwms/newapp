@@ -7,7 +7,6 @@ import time
 from typing import Dict, List, Union
 from dependency_injector.wiring import inject, Provide
 import asyncio, json, logging 
-from utils.patten_expectation import StockPricePredictor
 from sqlmodel import select
 import pytz
 from container.redis_container import Redis_Container
@@ -15,7 +14,6 @@ from container.postgres_container import Postgres_Container
 from container.socket_container import Socket_Container
 from container.kiwoom_container import Kiwoom_Container
 from container.step_manager_container import Step_Manager_Container
-from container.baseline_container import Baseline_Container
 from container.realtime_container import RealTime_Container
 from container.realtime_group_container import RealtimeGroup_container
 from db.redis_db import RedisDB
@@ -26,10 +24,8 @@ from module.realtimegroup_module import RealtimeGroupModule
 from module.baseline_module import BaselineModule
 from module.step_manager_module import StepManagerModule
 from module.realtime_module import RealtimeModule
-from redis_util.price_expectation import PriceExpectation
 from redis_util.stock_analysis import StockDataAnalyzer
 from models.isfirst import IsFirst
-from services.baseline_cache_service import BaselineCache
 from services.smart_trading_service import SmartTrading
 from redis_util.price_tracker_service import PriceTracker
 
@@ -45,14 +41,12 @@ class ProcessorModule:
                 socket_module: SocketModule = Provide[Socket_Container.socket_module],
                 kiwoom_module: KiwoomModule = Provide[Kiwoom_Container.kiwoom_module],
                 realtime_module:RealtimeModule = Provide[RealTime_Container.realtime_module],
-                baseline_module:BaselineModule =Provide[Baseline_Container.baseline_module] ,
                 step_manager_module : StepManagerModule = Provide[Step_Manager_Container.step_manager_module],
                 realtime_group_module:RealtimeGroupModule = Provide[RealtimeGroup_container.realtime_group_module] ):
         self.redis_db = redis_db.get_connection()
         self.postgres_db = postgres_db
         self.socket_module = socket_module
         self.kiwoom_module = kiwoom_module
-        self.baseline_module = baseline_module
         self.step_manager_module = step_manager_module
         self.realtime_module = realtime_module
         self.realtime_group_module = realtime_group_module
@@ -74,10 +68,7 @@ class ProcessorModule:
         self.order_tracker ={}
         self.order_execution_tracker = {}  # 새로운 추적용
         
-        self.StockPricePredictor = StockPricePredictor(self.redis_db)
         self.StockDataAnalyzer = StockDataAnalyzer(self.redis_db)
-        self.PE = PriceExpectation(self.redis_db)
-        self.BC = BaselineCache(self.postgres_db)
         self.PT = PriceTracker(self.redis_db)
         self.ST = SmartTrading( self.kiwoom_module, 
                                 self.PT, 
@@ -1196,29 +1187,6 @@ class ProcessorModule:
                     
             except Exception as redis_error:
                 logging.error(f"❌ Redis 데이터 제거 중 오류: {redis_error}")
-            
-            # 취소 이력 저장 (선택적)
-            try:
-                cancel_record = {
-                    'cancelled_at': time.time(),
-                    'reason': 'auto_cancel_timeout',
-                    'age_minutes': age_minutes,
-                    'data_source': 'socket_module',
-                    **order_data
-                }
-                
-                # 취소 이력을 별도 키에 저장 (24시간 보관)
-                cancel_key = f"redis:cancel:{clean_stock_code}:{order_number}"
-                await self.redis_db.setex(
-                    cancel_key, 
-                    60 * 60 * 24,  # 24시간
-                    json.dumps(cancel_record, ensure_ascii=False)
-                )
-                
-                logging.debug(f"📝 취소 이력 저장: {cancel_key}")
-                
-            except Exception as history_error:
-                logging.error(f"❌ 취소 이력 저장 중 오류: {history_error}")
             
         except Exception as e:
             logging.error(f"주문 취소 처리 중 전체 오류: {str(e)}")
