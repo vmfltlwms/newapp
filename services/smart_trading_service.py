@@ -23,8 +23,8 @@ class TradingConstants:
     MAIN_TRADING_START: datetime_time = datetime_time(9, 30)
     MAIN_TRADING_END: datetime_time = datetime_time(13, 0)
     AFTERNOON_START: datetime_time = datetime_time(13, 0)
-    AFTERNOON_END: datetime_time = datetime_time(15, 0)
-    FORCE_SELL_TIME: datetime_time = datetime_time(15, 0)
+    AFTERNOON_END: datetime_time = datetime_time(14, 40)
+    FORCE_SELL_TIME: datetime_time = datetime_time(14, 40)
     
     # 갭상승 매수 조건
     GAP_EXECUTION_STRENGTH_MIN: float = 150.0
@@ -395,14 +395,13 @@ class SmartTrading:
                 logger.debug(f"[{stock_code}] 거래 신호 없음: {signal.reason}")
                 return False
             
-            # 현재가 조회
-            current_price = 0
-            if signal.analysis_data:
-                current_price = signal.analysis_data.get("latest_data", {}).get("current_price", 0)
-            
-            if current_price <= 0:
+            # 현재가 조회 - get_price_info 사용
+            price_info = await self.price_tracker.get_price_info(stock_code)
+            if not price_info or price_info.get('current_price', 0) <= 0:
                 logger.error(f"[{stock_code}] 현재가 조회 실패")
                 return False
+            
+            current_price = price_info['current_price']
             
             # 주문 실행
             if signal.action == "BUY":
@@ -411,18 +410,15 @@ class SmartTrading:
                 result = await self._execute_sell_order(stock_code, signal.quantity, current_price)
             
             if result:
-                # 거래 성공 시 일일 카운트 증가
                 await self.increment_daily_trade_count(stock_code)
                 logger.info(f"✅ [{stock_code}] {signal.action} 주문 성공: {signal.quantity}주 @ {current_price} - {signal.reason}")
-            else:
-                logger.error(f"❌ [{stock_code}] {signal.action} 주문 실패")
             
             return result
             
         except Exception as e:
             logger.error(f"❌ [{stock_code}] 주문 실행 예외: {e}")
             return False
-    
+        
     async def _execute_buy_order(self, stock_code: str, quantity: int, current_price: float) -> bool:
         """매수 주문 실행"""
         try:

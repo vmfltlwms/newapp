@@ -31,7 +31,6 @@ from container.socket_container import Socket_Container
 from container.redis_container import Redis_Container
 from container.postgres_container import Postgres_Container
 from container.processor_container import Processor_Container 
-from container.baseline_container import Baseline_Container
 from container.step_manager_container import Step_Manager_Container
 from container.realtime_group_container import RealtimeGroup_container
 from module.socket_broadcast_module import WebSocketBroadcast
@@ -62,20 +61,17 @@ socket_container = Socket_Container(redis_db  = redis_container.redis_db,
 
 realtime_group_container = RealtimeGroup_container(postgres_db = postgres_container.postgres_db)
 realtime_container = RealTime_Container(socket_module = socket_container.socket_module)
-baseline_container = Baseline_Container(postgres_db = postgres_container.postgres_db)
 step_manager_container = Step_Manager_Container(postgres_db = postgres_container.postgres_db)
 processor_container = Processor_Container( redis_db=redis_container.redis_db,
                                           postgres_db = postgres_container.postgres_db,
                                           socket_module = socket_container.socket_module,
                                           realtime_module = realtime_container.realtime_module,
-                                          baseline_module = baseline_container.baseline_module,
                                           step_manager_module = step_manager_container.step_manager_module,
                                           realtime_group_module =realtime_group_container.realtime_group_module )
 
 kiwoom_container.wire(modules=["api.chart","module.processor_module"])
 socket_container.wire(modules=["api.realtime","module.realtime_module"])
 realtime_container.wire(modules=["api.realtime"])
-baseline_container.wire(modules=["api.baseline","module.processor_module"])
 step_manager_container.wire(modules=["api.baseline","module.processor_module"])
 realtime_group_container.wire(modules=["api.realtime_group","module.processor_module" ])
 
@@ -100,7 +96,6 @@ async def lifespan(app: FastAPI,):
     kiwoom_module = kiwoom_container.kiwoom_module()
     realtime_module = realtime_container.realtime_module()
     processor_module = processor_container.processor_module()
-    baseline_module = baseline_container.baseline_module()
     step_manager_module = step_manager_container.step_manager_module()
     realtime_group_module = realtime_group_container.realtime_group_module()
     bridge_module = WebSocketBroadcast(redis_db)
@@ -147,8 +142,6 @@ async def lifespan(app: FastAPI,):
         logging.info("🛑 백그라운드 태스크가 취소되었습니다")
     
     # 2. 모듈 종료 (초기화의 역순)
-    await baseline_module.shutdown()
-    logging.info("🛑 baseline_module 종료 완료")
 
     await processor_module.shutdown()
     logging.info("🛑 processor_module 종료 완료")
@@ -182,7 +175,6 @@ app = FastAPI(
 app.kiwoom = kiwoom_container 
 app.socket = socket_container   
 app.realtime = realtime_container   
-app.baseline = baseline_container
 app.realtime_group = realtime_group_container
 app.step_manager = step_manager_container  # ✅ 이 줄 추가!
 

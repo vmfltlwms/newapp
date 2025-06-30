@@ -1,4 +1,5 @@
 # services/price_tracker_service.py (성능 최적화)
+import json
 import time
 import logging
 from typing import Dict, Optional
@@ -218,8 +219,8 @@ class PriceTracker:
                     # 최고가 갱신
                     if current_price > highest_price:
                         update_fields["highest_price"] = str(current_price)
-                        logger.info(f"📈 최고가 갱신 - 종목: {stock_code}, "
-                                   f"{highest_price} → {current_price}")
+                        # logger.info(f"📈 최고가 갱신 - 종목: {stock_code}, "
+                                  #  f"{highest_price} → {current_price}")
                     
                     # 최저가 갱신
                     if current_price < lowest_price:
@@ -318,3 +319,63 @@ class PriceTracker:
             logger.error(f"❌ 가격 추적 데이터 조회 실패 - 종목: {stock_code}, 오류: {str(e)}")
             return {}
     
+    async def isfirst(self, stock_code: str) -> Optional[bool]:
+        """
+        첫 실행 여부 확인
+        
+        Args:
+            stock_code: 종목코드
+            
+        Returns:
+            bool: 첫 실행 여부 또는 None (데이터가 없는 경우)
+        """
+        try:
+            redis_key = self._get_redis_key(stock_code)
+            
+            # isfirst 필드만 조회 (성능 최적화)
+            isfirst_str = await self.redis_db.hget(redis_key, "isfirst")
+            
+            if isfirst_str is None:
+                logger.debug(f"종목 {stock_code}의 추적 데이터가 존재하지 않습니다.")
+                return None
+            
+            # 문자열을 boolean으로 변환
+            isfirst_value = isfirst_str.lower() == "true"
+            
+            logger.debug(f"종목 {stock_code}의 첫 실행 여부: {isfirst_value}")
+            return isfirst_value
+            
+        except Exception as e:
+            logger.error(f"❌ 첫 실행 여부 확인 실패 - 종목: {stock_code}, 오류: {str(e)}")
+            return None
+
+
+    async def set_isfirst(self, stock_code: str, isfirst: bool) -> bool:
+        """
+        첫 실행 여부 설정
+        
+        Args:
+            stock_code: 종목코드
+            isfirst: 설정할 첫 실행 여부
+            
+        Returns:
+            bool: 설정 성공 여부
+        """
+        try:
+            redis_key = self._get_redis_key(stock_code)
+            
+            # 데이터 존재 확인
+            if not await self.redis_db.exists(redis_key):
+                logger.debug(f"종목 {stock_code}의 가격 추적 데이터가 없습니다.")
+                return False
+            
+            # isfirst 필드 업데이트
+            await self.redis_db.hset(redis_key, "isfirst", str(isfirst))
+            await self.redis_db.expire(redis_key, self.EXPIRE_TIME)
+            
+            logger.info(f"✅ 첫 실행 여부 설정 완료 - 종목: {stock_code}, isfirst: {isfirst}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ 첫 실행 여부 설정 실패 - 종목: {stock_code}, 오류: {str(e)}")
+            return False

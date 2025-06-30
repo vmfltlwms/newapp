@@ -9,8 +9,6 @@ class Processor_Container(containers.DeclarativeContainer):
     socket_module = providers.Dependency()
     realtime_module = providers.Dependency()
     realtime_group_module = providers.Dependency()
-    baseline_module = providers.Dependency()
-    baseline_module = providers.Dependency()
     step_manager_module = providers.Dependency()
     
     # ProcessorModule 제공
@@ -20,7 +18,6 @@ class Processor_Container(containers.DeclarativeContainer):
         postgres_db = postgres_db,
         socket_module = socket_module,
         realtime_module =realtime_module,
-        baseline_module = baseline_module,
         step_manager_module = step_manager_module,
         realtime_group_module = realtime_group_module
     )

@@ -116,7 +116,7 @@ class StockDataAnalyzer:
                     logger.error(f"0B 데이터 처리 중 오류: {e}")
                     continue
 
-            logger.info(f"종목 {stock_code}: {len(results)}개의 0B 데이터 조회됨 (최근 {seconds}초)")
+            # logger.info(f"종목 {stock_code}: {len(results)}개의 0B 데이터 조회됨 (최근 {seconds}초)")
             return results
             
         except Exception as e:
@@ -311,7 +311,7 @@ class StockDataAnalyzer:
                 }
             }
             
-            logger.info(f"종목 {stock_code} 분석 완료 - 5분: {len(data_5min)}개, 1분: {len(data_1min)}개 데이터 처리")
+            # logger.info(f"종목 {stock_code} 분석 완료 - 5분: {len(data_5min)}개, 1분: {len(data_1min)}개 데이터 처리")
             return analysis_result
             
         except Exception as e:

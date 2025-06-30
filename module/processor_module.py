@@ -402,10 +402,9 @@ class ProcessorModule:
                 request_type = item.get('type')
                 request_item = item.get('item')
                 request_name = item.get('name')
-                
-                if request_type != "0B" :
+                if request_type != "0B":
                     logger.info(f"호출된 타입 {request_type} 아이템 {request_item} 이름 {request_name} (인덱스: {index})")
-                
+
                 # 해당 타입의 핸들러 찾기
                 handler = self.type_callback_table.get(request_type)
                 
@@ -422,7 +421,7 @@ class ProcessorModule:
     async def type_callback_00(self, data: dict): 
         try:
             values = data.get('values', {})   
-            stock_code = values.get('item')
+            stock_code = data.get('item')
             stock_code = stock_code[1:] if stock_code and stock_code.startswith('A') else stock_code
 
             if not stock_code:
@@ -599,7 +598,7 @@ class ProcessorModule:
         """현물잔고 데이터 처리 - 최신 데이터로 업데이트"""
         try:
             values = data.get('values', {})   
-            stock_code = values.get('item')
+            stock_code = data.get('item')
             stock_code = stock_code[1:] if stock_code and stock_code.startswith('A') else stock_code
      
             if not stock_code:
@@ -640,9 +639,10 @@ class ProcessorModule:
     async def type_callback_0B(self, data: dict):
         try:
             values = data.get('values', {})   
-            stock_code = values.get('item')
+            stock_code = data.get('item')
             stock_code = stock_code[1:] if stock_code and stock_code.startswith('A') else stock_code
-            
+
+                        
             if not stock_code:
                 logger.warning("0B 데이터에 종목코드가 없습니다.")
                 return
@@ -652,7 +652,9 @@ class ProcessorModule:
 
             #PT : PriceTracker    
             if current_price > 0:       
-                await self.PT.update_price(stock_code, current_price)
+                # await self.PT.update_tracking_data(stock_code = stock_code,
+                #                                    current_price = current_price
+                #                                    )
                 IsFirst = await self.PT.isfirst(stock_code)
                 if IsFirst : 
                     qty_to_buy = math.ceil((self.assigned_per_stock/current_price) / 10) * 10
@@ -906,7 +908,7 @@ class ProcessorModule:
                     # 🎯 trader_executor 백그라운드 task 등록
                     task = asyncio.create_task(self.trader_executor(code))
                     tasks.append(task)
-                    logger.info(f"🚀 [{code}] 거래 태스크 생성")
+                    # logger.info(f"🚀 [{code}] 거래 태스크 생성")
 
                 except Exception as e:
                     logger.error(f"❌ 종목 {code} 초기화 오류: {str(e)}")
