@@ -1,8 +1,9 @@
-# smart_trading_service.py - 새로운 전략 기반 개선 버전
+# smart_trading_service.py - 5분 에러 지속 시 매도 전략
 
 import logging
 from datetime import datetime, time as datetime_time
 from dataclasses import dataclass
+import time
 import pytz
 from dependency_injector.wiring import inject, Provide
 from container.redis_container import Redis_Container
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradingConstants:
-    """거래 관련 상수들 - 새로운 전략"""
+    """거래 관련 상수들"""
     # 홀딩 존
     HOLDING_ZONE_THRESHOLD: float = 2.0  # ±2%
     
@@ -39,6 +40,9 @@ class TradingConstants:
     PROFIT_ZONE_THRESHOLD: float = 2.0  # 2% 이상 상승
     TRAILING_STOP_THRESHOLD: float = 2.0  # 최고가 대비 2% 하락 시 매도
     PROFIT_RETURN_THRESHOLD: float = 2.0  # 매수가 +2% 되돌림 시 매도
+    
+    # 데이터 에러 기반 매도 조건
+    ERROR_DURATION_THRESHOLD: int = 300  # 5분(300초) 후 전량 매도
 
 
 @dataclass
@@ -48,7 +52,7 @@ class TradingSignal:
     quantity: int
     reason: str
     confidence: float = 0.0
-    time_zone: str = ""  # 시간대 정보 추가
+    time_zone: str = ""
     analysis_data: dict = None
 
 
@@ -62,7 +66,7 @@ class TimeZone:
 
 
 class SmartTrading:
-    """새로운 전략 기반 스마트 트레이딩 클래스"""
+    """스마트 트레이딩 클래스 - 5분 에러 지속 시 매도"""
     
     @inject
     def __init__(self, 
@@ -77,6 +81,9 @@ class SmartTrading:
         self.constants = TradingConstants()
         self.timezone = pytz.timezone('Asia/Seoul')
         
+        # 에러 시간 추적용 딕셔너리 (메모리 저장)
+        self.error_start_times = {}  # {stock_code: timestamp}
+    
     def safe_percentage_change(self, current: float, base: float) -> float:
         """안전한 퍼센트 변화율 계산"""
         if base == 0 or base is None or current is None:
@@ -100,6 +107,50 @@ class SmartTrading:
             return TimeZone.GAP_TRADING
         else:
             return TimeZone.CLOSED
+    
+    async def record_first_error_time(self, stock_code: str) -> None:
+        """첫 번째 에러 발생 시간 기록"""
+        try:
+            # 이미 기록된 에러 시간이 있는지 확인
+            if stock_code not in self.error_start_times:
+                current_time = time.time()
+                self.error_start_times[stock_code] = current_time
+                logger.warning(f"[{stock_code}] 첫 번째 데이터 에러 시간 기록: {datetime.fromtimestamp(current_time).strftime('%H:%M:%S')}")
+                
+        except Exception as e:
+            logger.error(f"[{stock_code}] 첫 에러 시간 기록 실패: {e}")
+
+    async def clear_error_record(self, stock_code: str) -> None:
+        """에러 기록 삭제 (정상 데이터 복구 시)"""
+        try:
+            if stock_code in self.error_start_times:
+                del self.error_start_times[stock_code]
+                logger.info(f"[{stock_code}] 에러 기록 삭제 - 데이터 정상 복구")
+                
+        except Exception as e:
+            logger.error(f"[{stock_code}] 에러 기록 삭제 실패: {e}")
+
+    async def should_emergency_sell(self, stock_code: str) -> tuple:
+        """5분 후 긴급 매도 조건 확인"""
+        try:
+            if stock_code not in self.error_start_times:
+                return False, ""
+            
+            first_error_time = self.error_start_times[stock_code]
+            current_time = time.time()
+            elapsed_seconds = int(current_time - first_error_time)
+            
+            if elapsed_seconds >= self.constants.ERROR_DURATION_THRESHOLD:
+                minutes = elapsed_seconds // 60
+                return True, f"데이터 에러 {minutes}분 지속 - 긴급 전량 매도"
+            
+            remaining_seconds = self.constants.ERROR_DURATION_THRESHOLD - elapsed_seconds
+            logger.debug(f"[{stock_code}] 데이터 에러 {elapsed_seconds}초 지속 - {remaining_seconds}초 후 긴급매도")
+            return False, f"데이터 에러 진행 중"
+            
+        except Exception as e:
+            logger.error(f"[{stock_code}] 긴급 매도 조건 확인 실패: {e}")
+            return False, "조건 확인 실패"
     
     async def get_daily_trade_count(self, stock_code: str) -> int:
         """일일 거래 횟수 조회"""
@@ -195,19 +246,16 @@ class SmartTrading:
             return False
     
     async def check_main_trading_conditions(self, stock_code: str, analysis_data: dict) -> int:
-        """메인 시간대 매매 조건 확인 (기존 로직 활용)"""
+        """메인 시간대 매매 조건 확인"""
         try:
-            # 기존 StockDataAnalyzer 기반 신호 생성 로직 활용
             analysis_1min = analysis_data.get("analysis_1min", {})
             analysis_5min = analysis_data.get("analysis_5min", {})
-            latest_data = analysis_data.get("latest_data", {})
             
             strength_1min = analysis_1min.get('execution_strength', 0)
-            strength_5min = analysis_5min.get('execution_strength', 0)
             momentum_1min = analysis_1min.get('momentum', {}).get('momentum', 'FLAT')
             buy_ratio_1min = analysis_1min.get('buy_ratio', 50)
             
-            # 신호 강도 계산 (간소화)
+            # 신호 강도 계산
             if strength_1min > 120 and momentum_1min == 'UP' and buy_ratio_1min > 60:
                 return 3  # 강한 매수
             elif strength_1min > 100 and buy_ratio_1min > 55:
@@ -293,32 +341,48 @@ class SmartTrading:
             return False, ""
     
     async def generate_trading_signal(self, stock_code: str) -> TradingSignal:
-        """새로운 전략 기반 거래 신호 생성"""
+        """거래 신호 생성 - 5분 에러 지속 시 매도"""
         try:
             # 1. 현재 시간대 확인
             time_zone = self.get_current_time_zone()
             
             # 2. 일일 거래 횟수 확인
             daily_count = await self.get_daily_trade_count(stock_code)
-            if daily_count >= 1:  # 일일 1회 제한
+            if daily_count >= 1:
                 return TradingSignal("NEUTRAL", 0, "일일 거래 횟수 초과", time_zone=time_zone)
             
-            # 3. 분석 데이터 조회
-            analysis_data = await self.stock_data_analyzer.analyze_stock_0b(stock_code)
-            if not analysis_data or "error" in analysis_data:
-                return TradingSignal("NEUTRAL", 0, "분석 데이터 없음", time_zone=time_zone)
-            
-            # 4. 현재가 및 추적 데이터 조회
-            current_price = analysis_data.get("latest_data", {}).get("current_price", 0)
+            # 3. 추적 데이터 먼저 조회 (qty_to_sell 필요)
             tracking_data = await self.price_tracker.get_tracking_data(stock_code)
-            
             if not tracking_data:
                 tracking_data = {}
             
             qty_to_sell = tracking_data.get('qty_to_sell', 0)
             qty_to_buy = tracking_data.get('qty_to_buy', 0)
             
-            # 5. 시간대별 로직 처리
+            # 4. 분석 데이터 조회
+            analysis_data = await self.stock_data_analyzer.analyze_stock_0b(stock_code)
+            
+            # 5. 데이터 에러 처리 로직
+            if not analysis_data or "error" in analysis_data:
+                # 첫 에러 시간 기록
+                await self.record_first_error_time(stock_code)
+                
+                # 5분 이상 지속되면 매도
+                should_sell, reason = await self.should_emergency_sell(stock_code)
+                if should_sell and qty_to_sell > 0:
+                    return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone)
+                
+                # 5분 안되면 그냥 대기
+                return TradingSignal("NEUTRAL", 0, "데이터 없음", time_zone=time_zone)
+            
+            else:
+                # 정상 데이터 복구시 에러 기록 삭제
+                await self.clear_error_record(stock_code)
+            
+            # 6. 현재가 확인
+            current_price = analysis_data.get("latest_data", {}).get("current_price", 0)
+            
+            # 7. 시간대별 로직 처리
             if time_zone == TimeZone.FORCE_SELL:
                 # 15:00 이후 - 전량 매도
                 if qty_to_sell > 0:
@@ -383,6 +447,8 @@ class SmartTrading:
             
         except Exception as e:
             logger.error(f"[{stock_code}] 거래 신호 생성 오류: {e}")
+            # 예외 발생도 에러로 간주하여 기록
+            await self.record_first_error_time(stock_code)
             return TradingSignal("NEUTRAL", 0, f"오류 발생: {str(e)}")
     
     async def execute_trade_order(self, stock_code: str) -> bool:
@@ -395,7 +461,7 @@ class SmartTrading:
                 logger.debug(f"[{stock_code}] 거래 신호 없음: {signal.reason}")
                 return False
             
-            # 현재가 조회 - get_price_info 사용
+            # 현재가 조회
             price_info = await self.price_tracker.get_price_info(stock_code)
             if not price_info or price_info.get('current_price', 0) <= 0:
                 logger.error(f"[{stock_code}] 현재가 조회 실패")
@@ -418,7 +484,7 @@ class SmartTrading:
         except Exception as e:
             logger.error(f"❌ [{stock_code}] 주문 실행 예외: {e}")
             return False
-        
+    
     async def _execute_buy_order(self, stock_code: str, quantity: int, current_price: float) -> bool:
         """매수 주문 실행"""
         try:
@@ -459,32 +525,54 @@ class SmartTrading:
             logger.error(f"매도 주문 실행 오류: {e}")
             return False
     
-    async def get_trading_status(self, stock_code: str) -> dict:
-        """종목의 현재 거래 상태 조회"""
+    async def get_error_status(self, stock_code: str) -> dict:
+        """에러 상태 조회"""
         try:
-            # 현재 시간대
+            if stock_code not in self.error_start_times:
+                return {
+                    "has_error": False,
+                    "error_duration_seconds": 0,
+                    "remaining_seconds_until_sell": 0
+                }
+            
+            first_error_time = self.error_start_times[stock_code]
+            current_time = time.time()
+            elapsed_seconds = int(current_time - first_error_time)
+            remaining_seconds = max(0, self.constants.ERROR_DURATION_THRESHOLD - elapsed_seconds)
+            
+            return {
+                "has_error": True,
+                "first_error_time": datetime.fromtimestamp(first_error_time).strftime('%H:%M:%S'),
+                "error_duration_seconds": elapsed_seconds,
+                "error_duration_minutes": elapsed_seconds // 60,
+                "remaining_seconds_until_sell": remaining_seconds,
+                "will_sell_at": datetime.fromtimestamp(first_error_time + self.constants.ERROR_DURATION_THRESHOLD).strftime('%H:%M:%S') if remaining_seconds > 0 else "NOW"
+            }
+            
+        except Exception as e:
+            logger.error(f"[{stock_code}] 에러 상태 조회 실패: {e}")
+            return {"has_error": False, "error": str(e)}
+
+    async def get_trading_status(self, stock_code: str) -> dict:
+        """종목의 현재 거래 상태 조회 - 에러 정보 포함"""
+        try:
+            # 기존 정보들
             time_zone = self.get_current_time_zone()
-            
-            # 일일 거래 횟수
             daily_count = await self.get_daily_trade_count(stock_code)
-            
-            # 분석 데이터
             analysis_data = await self.stock_data_analyzer.analyze_stock_0b(stock_code)
-            
-            # 추적 데이터
             tracking_data = await self.price_tracker.get_tracking_data(stock_code)
-            
-            # 13시 이후 최고가
             highest_13h = await self.get_13h_highest_price(stock_code)
-            
-            # 거래 신호
             signal = await self.generate_trading_signal(stock_code)
+            
+            # 에러 상태 추가
+            error_status = await self.get_error_status(stock_code)
             
             return {
                 "stock_code": stock_code,
                 "time_zone": time_zone,
                 "daily_trade_count": daily_count,
                 "highest_after_13h": highest_13h,
+                "error_status": error_status,  # 에러 정보 추가
                 "signal": {
                     "action": signal.action,
                     "quantity": signal.quantity,

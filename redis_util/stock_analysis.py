@@ -93,7 +93,6 @@ class StockDataAnalyzer:
         try:
             # Redis Sorted Set에서 시간 범위별 데이터 조회
             raw_data = await self.redis_db.zrangebyscore(redis_key, min=since, max=now)
-            
             if not raw_data:
                 logger.info(f"종목 {stock_code}의 최근 {seconds}초 데이터가 없습니다.")
                 return []
