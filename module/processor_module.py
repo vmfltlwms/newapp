@@ -60,6 +60,7 @@ class ProcessorModule:
         self.timezone = pytz.timezone('Asia/Seoul')
 
         self.holding_stock =[]           # 현재 보유중인 주식
+        self.account_info ={}            # 현재 보유중인 주식
         self.stock_qty = {}              # 현재 주식별 보유 수량 관리
         self.deposit = 0                 # 예수금
         self.assigned_per_stock = 0      # 각 주식별 거래가능 금액
@@ -652,21 +653,26 @@ class ProcessorModule:
 
             #PT : PriceTracker    
             if current_price > 0:       
-                # await self.PT.update_tracking_data(stock_code = stock_code,
-                #                                    current_price = current_price
-                #                                    )
+
                 IsFirst = await self.PT.isfirst(stock_code)
                 if IsFirst : 
+                    stock_info = self.account_info.get(stock_code, {}) if hasattr(self, 'account_info') and self.account_info else {}
+
+                    # 보유 수량 및 평균 매수가 추출
+                    current_qty_to_sell = int(stock_info.get('qty', 0))  # 보유 수량
+                    trade_price = int(stock_info.get('avg_price', 0))    # 평균 매수가
+                    logger.info(f"보유주식 업데이트 {stock_code} , 구매가 {trade_price}, 보유수{current_qty_to_sell}")
+                    
                     qty_to_buy = math.ceil((self.assigned_per_stock/current_price) / 10) * 10
                     logger.info(f"{stock_code} 첫번째 실행 -> 매수 가능주식 : {qty_to_buy}")
                     await self.PT.initialize_tracking( # 처음 값이 들어오면 qty_to_sell 계산
                                                                   stock_code = stock_code,
                                                                   current_price = 0, 
-                                                                  trade_price = 0, 
+                                                                  trade_price = trade_price, 
                                                                   period_type = False,
                                                                   isfirst = False,
-                                                                  qty_to_sell = 0,
-                                                                  qty_to_buy = qty_to_buy,
+                                                                  qty_to_sell = current_qty_to_sell,
+                                                                  qty_to_buy = qty_to_buy - current_qty_to_sell,
                                                                   trade_type = "HOLD" )
                 else : 
                     await self.PT.update_tracking_data( stock_code = stock_code, 
@@ -860,7 +866,6 @@ class ProcessorModule:
             isfirst = await self.isfirst_start() # 오늘 첫번째 실행인지 확인   
             isfirst = 1 # 오늘 첫번째 실행인지 확인   
             if isfirst :
-                logger.info("isfirst 실행")
                 await self.realtime_group_module.delete_by_group(0)
                 await self.realtime_group_module.delete_by_group(1)
                 await self.realtime_group_module.create_new(group=0, data_type=[], stock_code=[])
@@ -872,6 +877,9 @@ class ProcessorModule:
                 await asyncio.sleep(0.3)
                 await self.realtime_module.request_condition_search(seq="1")
                 await asyncio.sleep(0.3)
+                holding_stocks_info = await self.kiwoom_module.get_account_info()
+                  # 계좌 정보에서 보유 주식 정보 추출
+                self.account_info = self.extract_holding_stocks_info(holding_stocks_info)
             
             # 조건 검색으로 만들어진 그룹   
             res = await self.realtime_group_module.get_all_groups()  
@@ -1240,3 +1248,71 @@ class ProcessorModule:
                     return True
                 else:
                     return False
+                      
+    def extract_holding_stocks_info(self, account_info):
+        """계좌 정보에서 보유 주식 정보 추출"""
+        holding_stocks = {}
+        
+        try:
+            if not account_info or not isinstance(account_info, dict):
+                logger.warning("계좌 정보가 없거나 잘못된 형식입니다.")
+                return holding_stocks
+            
+            # acnt_evlt_remn_indv_tot 배열에서 주식 정보 추출
+            stock_list = account_info.get('acnt_evlt_remn_indv_tot', [])
+            
+            for stock_item in stock_list:
+                try:
+                    # 종목코드 (A 제거)
+                    stock_code = stock_item.get('stk_cd', '')
+                    if stock_code.startswith('A'):
+                        stock_code = stock_code[1:]
+                    
+                    if not stock_code:
+                        continue
+                    
+                    # 보유 수량 (rmnd_qty)
+                    rmnd_qty_str = stock_item.get('rmnd_qty', '0')
+                    rmnd_qty = self.safe_int_convert(rmnd_qty_str)
+                    
+                    # 평균 매수가 (pur_pric)
+                    pur_pric_str = stock_item.get('pur_pric', '0')
+                    pur_pric = self.safe_int_convert(pur_pric_str)
+                    
+                    # 현재가 (cur_prc)
+                    cur_prc_str = stock_item.get('cur_prc', '0')
+                    cur_prc = self.safe_int_convert(cur_prc_str)
+                    
+                    # 종목명
+                    stock_name = stock_item.get('stk_nm', '')
+                    
+                    # 수익률
+                    prft_rt_str = stock_item.get('prft_rt', '0')
+                    try:
+                        prft_rt = float(prft_rt_str)
+                    except (ValueError, TypeError):
+                        prft_rt = 0.0
+                    
+                    # 보유 수량이 0보다 큰 종목만 저장
+                    if rmnd_qty > 0:
+                        holding_stocks[stock_code] = {
+                            'qty': rmnd_qty,           # 보유 수량
+                            'avg_price': pur_pric,     # 평균 매수가
+                            'current_price': cur_prc,  # 현재가
+                            'stock_name': stock_name,  # 종목명
+                            'profit_rate': prft_rt,    # 수익률
+                            'trade_able_qty': self.safe_int_convert(stock_item.get('trde_able_qty', '0'))  # 거래가능수량
+                        }
+                        
+                        logger.info(f"📊 보유 종목 발견: {stock_code}({stock_name}) - {rmnd_qty}주, 평단가: {pur_pric:,}원, 현재가: {cur_prc:,}원, 수익률: {prft_rt:.2f}%")
+                    
+                except Exception as e:
+                    logger.error(f"❌ 주식 정보 파싱 오류: {e}, 데이터: {stock_item}")
+                    continue
+            
+            logger.info(f"💼 총 보유 종목 수: {len(holding_stocks)}개")
+            return holding_stocks
+            
+        except Exception as e:
+            logger.error(f"❌ 보유 주식 정보 추출 실패: {e}")
+            return holding_stocks

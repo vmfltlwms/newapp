@@ -1,13 +1,13 @@
-# smart_trading_service.py - 5분 에러 지속 시 매도 전략
+# smart_trading_service.py - 완전히 새로 작성된 버전
 
 import logging
 from datetime import datetime, time as datetime_time
 from dataclasses import dataclass
 import time
-import pytz
 from dependency_injector.wiring import inject, Provide
 from container.redis_container import Redis_Container
 from db.redis_db import RedisDB
+from zoneinfo import ZoneInfo  # Python 3.9+
 
 logger = logging.getLogger(__name__)
 
@@ -18,31 +18,36 @@ class TradingConstants:
     # 홀딩 존
     HOLDING_ZONE_THRESHOLD: float = 2.0  # ±2%
     
-    # 시간대별 구분
-    GAP_TRADING_START: datetime_time = datetime_time(9, 5)
-    GAP_TRADING_END: datetime_time = datetime_time(9, 30)
-    MAIN_TRADING_START: datetime_time = datetime_time(9, 30)
-    MAIN_TRADING_END: datetime_time = datetime_time(13, 0)
-    AFTERNOON_START: datetime_time = datetime_time(13, 0)
-    AFTERNOON_END: datetime_time = datetime_time(14, 40)
-    FORCE_SELL_TIME: datetime_time = datetime_time(14, 40)
+    # 시간대별 구분 (한국시간)
+    MONITOR_START: datetime_time = datetime_time(9, 0)   # 09:00
+    MONITOR_END: datetime_time = datetime_time(9, 5)     # 09:05
+    GAP_TRADING_START: datetime_time = datetime_time(9, 5)   # 09:05
+    GAP_TRADING_END: datetime_time = datetime_time(9, 30)    # 09:30
+    MAIN_TRADING_START: datetime_time = datetime_time(9, 30) # 09:30
+    MAIN_TRADING_END: datetime_time = datetime_time(13, 0)   # 13:00
+    AFTERNOON_START: datetime_time = datetime_time(13, 0)    # 13:00
+    AFTERNOON_END: datetime_time = datetime_time(15, 0)      # 15:00
     
-    # 갭상승 매수 조건
-    GAP_EXECUTION_STRENGTH_MIN: float = 150.0
-    GAP_OPEN_RISE_MIN: float = 1.0  # 시가 대비 1% 이상
-    GAP_TRADE_AMOUNT_MIN: int = 100000000  # 1억원
+    # 갭상승 매수 조건 (09:05~09:30)
+    GAP_EXECUTION_STRENGTH_MIN: float = 150.0           # 체결강도 150 이상
+    GAP_AVG_TRADE_AMOUNT_MIN: int = 100_000_000         # 5분간 평균거래대금 1억원 이상
+    GAP_OPEN_RISE_MIN: float = 1.0                      # 시가 대비 1% 이상 상승
     
-    # 오후 매도 조건
-    AFTERNOON_HIGH_DROP_THRESHOLD: float = 1.0  # 13시 이후 최고가 대비 1% 하락
-    AFTERNOON_BUY_DROP_THRESHOLD: float = 1.0   # 매수가 대비 1% 하락
+    # 갭상승 매도 조건 (09:05~09:30)
+    GAP_HIGH_DROP_THRESHOLD: float = 2.0                # 최고가 대비 2% 하락
+    GAP_BUY_DROP_THRESHOLD: float = 1.0                 # 매수가 대비 1% 하락
     
-    # 수익 실현 조건 (09:30~13:00)
-    PROFIT_ZONE_THRESHOLD: float = 2.0  # 2% 이상 상승
-    TRAILING_STOP_THRESHOLD: float = 2.0  # 최고가 대비 2% 하락 시 매도
-    PROFIT_RETURN_THRESHOLD: float = 2.0  # 매수가 +2% 되돌림 시 매도
+    # 메인 거래 조건 (09:30~13:00) - 기존 로직 사용
+    PROFIT_ZONE_THRESHOLD: float = 2.0                  # 2% 이상 상승
+    TRAILING_STOP_THRESHOLD: float = 2.0                # 최고가 대비 2% 하락 시 매도
+    PROFIT_RETURN_THRESHOLD: float = 2.0                # 매수가 +2% 되돌림 시 매도
     
-    # 데이터 에러 기반 매도 조건
-    ERROR_DURATION_THRESHOLD: int = 300  # 5분(300초) 후 전량 매도
+    # 오후 매도 조건 (13:00~15:00)
+    AFTERNOON_HIGH_DROP_THRESHOLD: float = 1.0          # 13시 이후 최고가 대비 1% 하락
+    AFTERNOON_BUY_DROP_THRESHOLD: float = 1.0           # 매수가 대비 1% 하락
+    
+    # 데이터 에러 기반 매도 조건 (삭제됨)
+    # ERROR_DURATION_THRESHOLD: int = 300
 
 
 @dataclass
@@ -58,15 +63,15 @@ class TradingSignal:
 
 class TimeZone:
     """시간대 구분"""
-    GAP_TRADING = "GAP_TRADING"      # 09:05~09:30
-    MAIN_TRADING = "MAIN_TRADING"    # 09:30~13:00
-    AFTERNOON = "AFTERNOON"          # 13:00~15:00
-    FORCE_SELL = "FORCE_SELL"        # 15:00 이후
-    CLOSED = "CLOSED"                # 장 마감
+    MONITOR = "MONITOR"                  # 09:00~09:05 모니터링
+    GAP_TRADING = "GAP_TRADING"          # 09:05~09:30 갭상승 매수
+    MAIN_TRADING = "MAIN_TRADING"        # 09:30~13:00 메인 거래
+    AFTERNOON = "AFTERNOON"              # 13:00~15:00 오후 거래
+    CLOSED = "CLOSED"                    # 장 마감
 
 
 class SmartTrading:
-    """스마트 트레이딩 클래스 - 5분 에러 지속 시 매도"""
+    """스마트 트레이딩 클래스 - 완전히 새로 작성된 버전"""
     
     @inject
     def __init__(self, 
@@ -79,10 +84,6 @@ class SmartTrading:
         self.stock_data_analyzer = stock_data_analyzer
         self.redis_db = redis_db
         self.constants = TradingConstants()
-        self.timezone = pytz.timezone('Asia/Seoul')
-        
-        # 에러 시간 추적용 딕셔너리 (메모리 저장)
-        self.error_start_times = {}  # {stock_code: timestamp}
     
     def safe_percentage_change(self, current: float, base: float) -> float:
         """안전한 퍼센트 변화율 계산"""
@@ -90,172 +91,202 @@ class SmartTrading:
             return 0.0
         return (current - base) / base * 100
     
-    def get_current_time_zone(self, current_time: datetime = None) -> str:
+    def get_current_time_zone(self) -> str:
         """현재 시간대 구분"""
-        if current_time is None:
-            current_time = datetime.now(self.timezone)
+        current_time = datetime.now(ZoneInfo("Asia/Seoul"))
         
+        # datetime.datetime에서 time 부분만 추출하여 비교
         current_time_only = current_time.time()
         
-        if current_time_only >= self.constants.FORCE_SELL_TIME:
-            return TimeZone.FORCE_SELL
-        elif current_time_only >= self.constants.AFTERNOON_START:
+        if current_time_only >= self.constants.AFTERNOON_START:
             return TimeZone.AFTERNOON
         elif current_time_only >= self.constants.MAIN_TRADING_START:
             return TimeZone.MAIN_TRADING
         elif current_time_only >= self.constants.GAP_TRADING_START:
             return TimeZone.GAP_TRADING
+        elif current_time_only >= self.constants.MONITOR_START:
+            return TimeZone.MONITOR
         else:
             return TimeZone.CLOSED
     
-    async def record_first_error_time(self, stock_code: str) -> None:
-        """첫 번째 에러 발생 시간 기록"""
+    async def is_daily_trade_completed(self, stock_code: str) -> bool:
+        """
+        일일 거래 완료 여부 확인
+        
+        완료 조건:
+        1. qty_to_sell = 0 (매도할 물량이 모두 소진됨)
+        2. trade_type = "SELL" (마지막 거래가 매도였음)
+        
+        Returns:
+            bool: 일일 거래 완료 여부
+        """
         try:
-            # 이미 기록된 에러 시간이 있는지 확인
-            if stock_code not in self.error_start_times:
-                current_time = time.time()
-                self.error_start_times[stock_code] = current_time
-                logger.warning(f"[{stock_code}] 첫 번째 데이터 에러 시간 기록: {datetime.fromtimestamp(current_time).strftime('%H:%M:%S')}")
+            tracking_data = await self.price_tracker.get_tracking_data(stock_code)
+            
+            if not tracking_data:
+                logger.debug(f"[{stock_code}] 추적 데이터가 없습니다 - 거래 미완료")
+                return False
+            
+            qty_to_sell = tracking_data.get('qty_to_sell', 0)
+            trade_type = tracking_data.get('trade_type', 'HOLD')
+            
+            # 완료 조건: 매도 완료 (qty_to_sell=0 + trade_type="SELL")
+            is_completed = (qty_to_sell == 0 and trade_type == "SELL")
+            
+            if is_completed:
+                logger.info(f"[{stock_code}] ✅ 일일 거래 완료 - 매수/매도 모두 완료")
                 
-        except Exception as e:
-            logger.error(f"[{stock_code}] 첫 에러 시간 기록 실패: {e}")
-
-    async def clear_error_record(self, stock_code: str) -> None:
-        """에러 기록 삭제 (정상 데이터 복구 시)"""
-        try:
-            if stock_code in self.error_start_times:
-                del self.error_start_times[stock_code]
-                logger.info(f"[{stock_code}] 에러 기록 삭제 - 데이터 정상 복구")
-                
-        except Exception as e:
-            logger.error(f"[{stock_code}] 에러 기록 삭제 실패: {e}")
-
-    async def should_emergency_sell(self, stock_code: str) -> tuple:
-        """5분 후 긴급 매도 조건 확인"""
-        try:
-            if stock_code not in self.error_start_times:
-                return False, ""
+            else:
+                logger.debug(f"[{stock_code}] ⏳ 거래 진행 중 - qty_to_sell: {qty_to_sell}, trade_type: {trade_type}")
             
-            first_error_time = self.error_start_times[stock_code]
-            current_time = time.time()
-            elapsed_seconds = int(current_time - first_error_time)
-            
-            if elapsed_seconds >= self.constants.ERROR_DURATION_THRESHOLD:
-                minutes = elapsed_seconds // 60
-                return True, f"데이터 에러 {minutes}분 지속 - 긴급 전량 매도"
-            
-            remaining_seconds = self.constants.ERROR_DURATION_THRESHOLD - elapsed_seconds
-            logger.debug(f"[{stock_code}] 데이터 에러 {elapsed_seconds}초 지속 - {remaining_seconds}초 후 긴급매도")
-            return False, f"데이터 에러 진행 중"
+            return is_completed
             
         except Exception as e:
-            logger.error(f"[{stock_code}] 긴급 매도 조건 확인 실패: {e}")
-            return False, "조건 확인 실패"
+            logger.error(f"[{stock_code}] 일일 거래 완료 확인 오류: {e}")
+            return False
     
-    async def get_daily_trade_count(self, stock_code: str) -> int:
-        """일일 거래 횟수 조회"""
+    async def get_5min_average_trade_amount(self, stock_code: str) -> int:
+        """
+        5분간 평균 거래대금 조회 
+        
+        계산법: (09:00부터 현재까지 누적거래대금 / 거래시간) * 5분
+        
+        Returns:
+            int: 5분간 평균 거래대금 (원)
+        """
         try:
-            today_key = f"daily_trade_count:{stock_code}:{datetime.now(self.timezone).strftime('%Y%m%d')}"
-            count = await self.redis_db.get(today_key)
-            return int(count) if count else 0
-        except Exception as e:
-            logger.error(f"[{stock_code}] 일일 거래 횟수 조회 오류: {e}")
-            return 0
-    
-    async def increment_daily_trade_count(self, stock_code: str) -> None:
-        """일일 거래 횟수 증가"""
-        try:
-            today_key = f"daily_trade_count:{stock_code}:{datetime.now(self.timezone).strftime('%Y%m%d')}"
-            await self.redis_db.incr(today_key)
-            await self.redis_db.expire(today_key, 86400)  # 24시간 만료
-        except Exception as e:
-            logger.error(f"[{stock_code}] 일일 거래 횟수 증가 오류: {e}")
-    
-    async def get_13h_highest_price(self, stock_code: str) -> float:
-        """13시 이후 최고가 조회"""
-        try:
-            today_key = f"13h_highest:{stock_code}:{datetime.now(self.timezone).strftime('%Y%m%d')}"
-            highest = await self.redis_db.get(today_key)
-            return float(highest) if highest else 0.0
-        except Exception as e:
-            logger.error(f"[{stock_code}] 13시 이후 최고가 조회 오류: {e}")
-            return 0.0
-    
-    async def update_13h_highest_price(self, stock_code: str, current_price: float) -> None:
-        """13시 이후 최고가 업데이트"""
-        try:
-            today_key = f"13h_highest:{stock_code}:{datetime.now(self.timezone).strftime('%Y%m%d')}"
-            current_highest = await self.get_13h_highest_price(stock_code)
-            
-            if current_price > current_highest:
-                await self.redis_db.set(today_key, str(current_price))
-                await self.redis_db.expire(today_key, 86400)  # 24시간 만료
-                logger.debug(f"[{stock_code}] 13시 이후 최고가 업데이트: {current_highest} → {current_price}")
-        except Exception as e:
-            logger.error(f"[{stock_code}] 13시 이후 최고가 업데이트 오류: {e}")
-    
-    async def get_5min_trade_amount(self, stock_code: str) -> int:
-        """5분간 누적 거래대금 조회"""
-        try:
-            analysis_data = await self.stock_data_analyzer.get_recent_0b_data(stock_code, 300)  # 5분
-            if not analysis_data:
+            # 최신 0B 원시 데이터 조회
+            data_list = await self.stock_data_analyzer.get_recent_0b_data(stock_code, 60)  # 1분간 데이터
+            if not data_list:
+                logger.debug(f"[{stock_code}] 0B 데이터 없음")
                 return 0
             
-            total_amount = 0
-            for data in analysis_data[-60:]:  # 최근 5분간 데이터 (약 60개 정도)
-                amount = data.get('instant_amount', 0)
-                if amount > 0:
-                    total_amount += amount
+            # 가장 최신 데이터에서 누적거래대금 조회
+            latest_data = data_list[-1]
+            acc_amount = latest_data.get("acc_amount", 0)  # 파싱된 데이터의 acc_amount 사용
             
-            return total_amount
+            if acc_amount <= 0:
+                logger.debug(f"[{stock_code}] 누적거래대금 없음: {acc_amount}")
+                return 0
+            
+            # 현재 시간 (09:00부터 경과 시간 계산)
+            current_time = datetime.now(ZoneInfo("Asia/Seoul")).time()
+            market_start = datetime_time(9, 0)  # 09:00
+            
+            # 경과 시간 계산 (분 단위)
+            if current_time < market_start:
+                logger.debug(f"[{stock_code}] 장 시작 전")
+                return 0
+            
+            # 시간 차이를 분으로 계산
+            current_minutes = current_time.hour * 60 + current_time.minute
+            start_minutes = market_start.hour * 60 + market_start.minute
+            elapsed_minutes = current_minutes - start_minutes
+            
+            if elapsed_minutes <= 0:
+                logger.debug(f"[{stock_code}] 경과 시간 없음: {elapsed_minutes}분")
+                return 0
+            
+            # 5분간 평균 거래대금 계산
+            # (누적거래대금 / 경과시간) * 5분
+            avg_per_minute = acc_amount / elapsed_minutes
+            avg_5min = int(avg_per_minute * 5)
+            
+            logger.debug(f"[{stock_code}] 5분간 평균 거래대금: {avg_5min:,}원 "
+                        f"(누적: {acc_amount:,}, 경과: {elapsed_minutes}분)")
+            return avg_5min
+            
         except Exception as e:
-            logger.error(f"[{stock_code}] 5분간 거래대금 조회 오류: {e}")
+            logger.error(f"[{stock_code}] 5분간 평균 거래대금 조회 오류: {e}")
             return 0
     
     async def check_gap_trading_conditions(self, stock_code: str, analysis_data: dict) -> bool:
-        """갭상승 매수 조건 확인"""
+        """
+        갭상승 매수 조건 확인 (09:05~09:30)
+        
+        조건:
+        1. 체결강도 150 이상
+        2. 5분간 평균 거래대금 1억원 이상  
+        3. 시가 대비 현재가 1% 이상 상승
+        """
         try:
             latest_data = analysis_data.get("latest_data", {})
             
-            # 체결강도 확인
+            # 1. 체결강도 확인
             execution_strength = latest_data.get('execution_strength', 0)
             if execution_strength < self.constants.GAP_EXECUTION_STRENGTH_MIN:
+                logger.debug(f"[{stock_code}] 체결강도 부족: {execution_strength} < {self.constants.GAP_EXECUTION_STRENGTH_MIN}")
                 return False
             
-            # 시가 대비 상승률 확인
+            # 2. 5분간 평균 거래대금 확인
+            avg_trade_amount = await self.get_5min_average_trade_amount(stock_code)
+            if avg_trade_amount < self.constants.GAP_AVG_TRADE_AMOUNT_MIN:
+                logger.debug(f"[{stock_code}] 거래대금 부족: {avg_trade_amount:,} < {self.constants.GAP_AVG_TRADE_AMOUNT_MIN:,}")
+                return False
+            
+            # 3. 시가 대비 상승률 확인
             current_price = latest_data.get('current_price', 0)
             open_price = latest_data.get('open_price', 0)
-            if open_price > 0:
-                open_rise = self.safe_percentage_change(current_price, open_price)
-                if open_rise < self.constants.GAP_OPEN_RISE_MIN:
-                    return False
-            else:
+            
+            if open_price <= 0:
+                logger.debug(f"[{stock_code}] 시가 데이터 없음: {open_price}")
                 return False
             
-            # 5분간 거래대금 확인
-            trade_amount = await self.get_5min_trade_amount(stock_code)
-            if trade_amount < self.constants.GAP_TRADE_AMOUNT_MIN:
+            open_rise = self.safe_percentage_change(current_price, open_price)
+            if open_rise < self.constants.GAP_OPEN_RISE_MIN:
+                logger.debug(f"[{stock_code}] 시가 상승률 부족: {open_rise:.2f}% < {self.constants.GAP_OPEN_RISE_MIN}%")
                 return False
             
-            logger.info(f"[{stock_code}] 갭상승 조건 충족: 체결강도={execution_strength}, "
-                       f"시가상승={open_rise:.2f}%, 거래대금={trade_amount:,}원")
+            logger.info(f"[{stock_code}] ✅ 갭상승 조건 충족: 체결강도={execution_strength:.1f}, "
+                       f"거래대금={avg_trade_amount:,}원, 시가상승={open_rise:.2f}%")
             return True
             
         except Exception as e:
             logger.error(f"[{stock_code}] 갭상승 조건 확인 오류: {e}")
             return False
     
+    async def check_gap_sell_conditions(self, stock_code: str, current_price: float, tracking_data: dict) -> tuple:
+        """
+        갭상승 매도 조건 확인 (09:05~09:30)
+        
+        조건:
+        1. 최고가 대비 2% 하락
+        2. 매수가 대비 1% 하락
+        """
+        try:
+            trade_price = tracking_data.get('trade_price', 0)
+            highest_price = tracking_data.get('highest_price', 0)
+            
+            if trade_price <= 0:
+                return False, "매수가 정보 없음"
+            
+            # 1. 최고가 대비 2% 하락 확인
+            if highest_price > 0:
+                drop_from_high = self.safe_percentage_change(current_price, highest_price)
+                if drop_from_high <= -self.constants.GAP_HIGH_DROP_THRESHOLD:
+                    return True, f"최고가 대비 {drop_from_high:.2f}% 하락"
+            
+            # 2. 매수가 대비 1% 하락 확인
+            drop_from_buy = self.safe_percentage_change(current_price, trade_price)
+            if drop_from_buy <= -self.constants.GAP_BUY_DROP_THRESHOLD:
+                return True, f"매수가 대비 {drop_from_buy:.2f}% 하락"
+            
+            return False, ""
+            
+        except Exception as e:
+            logger.error(f"[{stock_code}] 갭상승 매도 조건 확인 오류: {e}")
+            return False, "조건 확인 실패"
+    
     async def check_main_trading_conditions(self, stock_code: str, analysis_data: dict) -> int:
-        """메인 시간대 매매 조건 확인"""
+        """메인 시간대 매매 조건 확인 (기존 로직 사용)"""
         try:
             analysis_1min = analysis_data.get("analysis_1min", {})
-            analysis_5min = analysis_data.get("analysis_5min", {})
             
             strength_1min = analysis_1min.get('execution_strength', 0)
             momentum_1min = analysis_1min.get('momentum', {}).get('momentum', 'FLAT')
             buy_ratio_1min = analysis_1min.get('buy_ratio', 50)
             
-            # 신호 강도 계산
+            # 신호 강도 계산 (기존 로직)
             if strength_1min > 120 and momentum_1min == 'UP' and buy_ratio_1min > 60:
                 return 3  # 강한 매수
             elif strength_1min > 100 and buy_ratio_1min > 55:
@@ -270,7 +301,7 @@ class SmartTrading:
             return 0
     
     async def check_holding_zone(self, stock_code: str, current_price: float, tracking_data: dict) -> bool:
-        """홀딩 존 확인 (±2%)"""
+        """홀딩 존 확인 (±2%) - 메인 거래 시간용"""
         try:
             trade_price = tracking_data.get('trade_price', 0)
             if trade_price <= 0:
@@ -287,28 +318,42 @@ class SmartTrading:
             return True  # 에러시 안전하게 홀딩
     
     async def check_profit_zone_conditions(self, stock_code: str, current_price: float, tracking_data: dict) -> tuple:
-        """수익 구간 매도 조건 확인"""
+        """
+        수익 구간 매도 조건 확인 - 메인 거래 시간용
+        
+        구간별 전략:
+        - 4% 이상 상승: 트레일링 스톱만 (최고가 대비 2% 하락)
+        - 2%~4% 상승: 수익 확정 우선 (매수가+2% 도달 시 매도)
+        """
         try:
             trade_price = tracking_data.get('trade_price', 0)
-            highest_after_buy = tracking_data.get('highest_price', 0)
+            highest_price = tracking_data.get('highest_price', 0)
             
             if trade_price <= 0:
                 return False, ""
             
             current_change = self.safe_percentage_change(current_price, trade_price)
+            profit_target = trade_price * (1 + self.constants.PROFIT_RETURN_THRESHOLD / 100)  # 매수가 + 2%
             
-            # 2% 이상 상승했는지 확인
+            # 현재가가 매수가 대비 2% 이상 상승한 상태인지 확인
             if current_change >= self.constants.PROFIT_ZONE_THRESHOLD:
-                # 최고가 대비 2% 하락 확인
-                if highest_after_buy > 0:
-                    drop_from_high = self.safe_percentage_change(current_price, highest_after_buy)
-                    if drop_from_high <= -self.constants.TRAILING_STOP_THRESHOLD:
-                        return True, f"트레일링 스톱: 최고가 대비 {drop_from_high:.2f}% 하락"
                 
-                # 매수가 +2% 되돌림 확인
-                profit_target = trade_price * (1 + self.constants.PROFIT_RETURN_THRESHOLD / 100)
-                if current_price <= profit_target and current_change >= self.constants.PROFIT_RETURN_THRESHOLD:
-                    return True, f"수익 확정: 매수가 +{self.constants.PROFIT_RETURN_THRESHOLD}% 되돌림"
+                if current_change >= 4.0:
+                    # 4% 이상 상승 구간: 트레일링 스톱만
+                    if highest_price > 0:
+                        drop_from_high = self.safe_percentage_change(current_price, highest_price)
+                        if drop_from_high <= -self.constants.TRAILING_STOP_THRESHOLD:
+                            return True, f"트레일링 스톱 (4%+ 구간): 최고가 대비 {drop_from_high:.2f}% 하락"
+                else:
+                    # 2%~4% 상승 구간: 수익 확정 우선
+                    if current_price <= profit_target:
+                        return True, f"수익 확정 (2-4% 구간): 매수가+{self.constants.PROFIT_RETURN_THRESHOLD}% 지점 도달"
+                    
+                    # 트레일링 스톱도 체크
+                    if highest_price > 0:
+                        drop_from_high = self.safe_percentage_change(current_price, highest_price)
+                        if drop_from_high <= -self.constants.TRAILING_STOP_THRESHOLD:
+                            return True, f"트레일링 스톱 (2-4% 구간): 최고가 대비 {drop_from_high:.2f}% 하락"
             
             return False, ""
             
@@ -317,18 +362,24 @@ class SmartTrading:
             return False, ""
     
     async def check_afternoon_sell_conditions(self, stock_code: str, current_price: float, tracking_data: dict) -> tuple:
-        """오후 매도 조건 확인"""
+        """
+        오후 매도 조건 확인 (13:00~15:00)
+        
+        조건:
+        1. 13시 이후 최고가 대비 1% 하락 (price_tracker의 highest_price 사용)
+        2. 매수가 대비 1% 하락
+        """
         try:
             trade_price = tracking_data.get('trade_price', 0)
+            highest_price = tracking_data.get('highest_price', 0)  # 13시 이후 리셋된 최고가
             
-            # 13시 이후 최고가 대비 1% 하락 확인
-            highest_13h = await self.get_13h_highest_price(stock_code)
-            if highest_13h > 0:
-                drop_from_13h_high = self.safe_percentage_change(current_price, highest_13h)
-                if drop_from_13h_high <= -self.constants.AFTERNOON_HIGH_DROP_THRESHOLD:
-                    return True, f"13시 이후 최고가 대비 {drop_from_13h_high:.2f}% 하락"
+            # 1. 13시 이후 최고가 대비 1% 하락 확인
+            if highest_price > 0:
+                drop_from_high = self.safe_percentage_change(current_price, highest_price)
+                if drop_from_high <= -self.constants.AFTERNOON_HIGH_DROP_THRESHOLD:
+                    return True, f"13시 이후 최고가 대비 {drop_from_high:.2f}% 하락"
             
-            # 매수가 대비 1% 하락 확인
+            # 2. 매수가 대비 1% 하락 확인
             if trade_price > 0:
                 drop_from_buy = self.safe_percentage_change(current_price, trade_price)
                 if drop_from_buy <= -self.constants.AFTERNOON_BUY_DROP_THRESHOLD:
@@ -339,88 +390,92 @@ class SmartTrading:
         except Exception as e:
             logger.error(f"[{stock_code}] 오후 매도 조건 확인 오류: {e}")
             return False, ""
-    
+
     async def generate_trading_signal(self, stock_code: str) -> TradingSignal:
-        """거래 신호 생성 - 5분 에러 지속 시 매도"""
+        """거래 신호 생성 - 완전히 새로 작성된 버전"""
         try:
             # 1. 현재 시간대 확인
             time_zone = self.get_current_time_zone()
             
-            # 2. 일일 거래 횟수 확인
-            daily_count = await self.get_daily_trade_count(stock_code)
-            if daily_count >= 1:
-                return TradingSignal("NEUTRAL", 0, "일일 거래 횟수 초과", time_zone=time_zone)
+            # 2. 일일 거래 완료 여부 확인
+            is_completed = await self.is_daily_trade_completed(stock_code)
+            if is_completed:
+                return TradingSignal("NEUTRAL", 0, "일일 거래 완료", time_zone=time_zone)
             
-            # 3. 추적 데이터 먼저 조회 (qty_to_sell 필요)
+            # 3. 추적 데이터 조회
             tracking_data = await self.price_tracker.get_tracking_data(stock_code)
             if not tracking_data:
                 tracking_data = {}
             
             qty_to_sell = tracking_data.get('qty_to_sell', 0)
             qty_to_buy = tracking_data.get('qty_to_buy', 0)
-            
+            price_info = await self.price_tracker.get_price_info(stock_code)
+            cur_pri = price_info.get('current_price',0)
+            tra_pri = price_info.get('trade_price',0)
+            logger.info(f"{stock_code}, {cur_pri} / {tra_pri} ,{qty_to_sell} ")
             # 4. 분석 데이터 조회
             analysis_data = await self.stock_data_analyzer.analyze_stock_0b(stock_code)
             
-            # 5. 데이터 에러 처리 로직
+            # 5. 데이터 에러 처리 (삭제됨)
             if not analysis_data or "error" in analysis_data:
-                # 첫 에러 시간 기록
-                await self.record_first_error_time(stock_code)
-                
-                # 5분 이상 지속되면 매도
-                should_sell, reason = await self.should_emergency_sell(stock_code)
-                if should_sell and qty_to_sell > 0:
-                    return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone)
-                
-                # 5분 안되면 그냥 대기
                 return TradingSignal("NEUTRAL", 0, "데이터 없음", time_zone=time_zone)
             
-            else:
-                # 정상 데이터 복구시 에러 기록 삭제
-                await self.clear_error_record(stock_code)
-            
             # 6. 현재가 확인
-            current_price = analysis_data.get("latest_data", {}).get("current_price", 0)
+            current_price = tracking_data.get('current_price', 0)
+            if current_price <= 0:
+                return TradingSignal("NEUTRAL", 0, "현재가 정보 없음", time_zone=time_zone)
             
-            # 7. 시간대별 로직 처리
-            if time_zone == TimeZone.FORCE_SELL:
-                # 15:00 이후 - 전량 매도
-                if qty_to_sell > 0:
-                    return TradingSignal("SELL", qty_to_sell, "15시 이후 강제 청산", time_zone=time_zone, analysis_data=analysis_data)
-                return TradingSignal("NEUTRAL", 0, "매도할 물량 없음", time_zone=time_zone)
             
-            elif time_zone == TimeZone.CLOSED:
+            # 8. 시간대별 거래 로직
+            if time_zone == TimeZone.CLOSED:
                 return TradingSignal("NEUTRAL", 0, "장 마감", time_zone=time_zone)
             
+            elif time_zone == TimeZone.MONITOR:
+                # 09:00~09:05 모니터링만
+                return TradingSignal("NEUTRAL", 0, "모니터링 시간", time_zone=time_zone)
+            
             elif time_zone == TimeZone.GAP_TRADING:
-                # 09:05~09:30 - 갭상승 매수만
+                # 09:05~09:30 갭상승 매수/매도
+                
+                # 매도 조건 확인 (보유 중일 때)
+                if qty_to_sell > 0:
+                    should_sell, reason = await self.check_gap_sell_conditions(stock_code, current_price, tracking_data)
+                    if should_sell:
+                        return TradingSignal("SELL", qty_to_sell, f"갭상승 {reason}", time_zone=time_zone, analysis_data=analysis_data)
+                
+                # 매수 조건 확인
                 if qty_to_buy > 0:
                     if await self.check_gap_trading_conditions(stock_code, analysis_data):
                         return TradingSignal("BUY", qty_to_buy, "갭상승 매수 조건 충족", time_zone=time_zone, analysis_data=analysis_data)
+                
                 return TradingSignal("NEUTRAL", 0, "갭상승 조건 미충족", time_zone=time_zone)
             
             elif time_zone == TimeZone.MAIN_TRADING:
-                # 09:30~13:00 - 메인 거래 + 홀딩존 + 수익실현
-                
-                # 보유 중일 때 홀딩존 확인
+                # 09:30~13:00 메인 거래 (기존 로직 사용)
+  
                 if qty_to_sell > 0:
+                    # 홀딩존 확인
                     in_holding_zone = await self.check_holding_zone(stock_code, current_price, tracking_data)
                     
+                    
                     if in_holding_zone:
-                        # 홀딩존 내에서는 수익실현 조건만 확인
-                        should_sell, reason = await self.check_profit_zone_conditions(stock_code, current_price, tracking_data)
-                        if should_sell:
-                            return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone, analysis_data=analysis_data)
+                        # 홀딩존 내에서는 아무것도 하지 않음 (보유 유지)
                         return TradingSignal("NEUTRAL", 0, "홀딩존 내 보유", time_zone=time_zone)
                     else:
-                        # 홀딩존 벗어난 경우 (±2% 이상)
+                        # 홀딩존 벗어난 경우
                         change_rate = self.safe_percentage_change(current_price, tracking_data.get('trade_price', 0))
+                        
                         if change_rate > self.constants.HOLDING_ZONE_THRESHOLD:
-                            # 2% 이상 상승 - 수익실현 조건 확인
+                            # 상승해서 홀딩존을 벗어난 경우: 수익실현 조건 확인
                             should_sell, reason = await self.check_profit_zone_conditions(stock_code, current_price, tracking_data)
                             if should_sell:
                                 return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone, analysis_data=analysis_data)
-                        # 2% 이상 하락은 일단 홀드 (손절은 오후에만)
+                            # 수익실현 조건 미충족시 계속 보유
+                            return TradingSignal("NEUTRAL", 0, f"수익구간 보유 중 ({change_rate:.2f}%)", time_zone=time_zone)
+                        
+                        elif change_rate < -self.constants.HOLDING_ZONE_THRESHOLD:
+                            # 하락해서 홀딩존을 벗어난 경우: 손절 실행
+                            return TradingSignal("SELL", qty_to_sell, f"손절: 매수가 대비 {change_rate:.2f}% 하락", time_zone=time_zone, analysis_data=analysis_data)
                 
                 # 매수 조건 확인
                 if qty_to_buy > 0:
@@ -429,12 +484,11 @@ class SmartTrading:
                         return TradingSignal("BUY", qty_to_buy, f"메인 매수 신호: {signal_strength}", time_zone=time_zone, analysis_data=analysis_data)
                 
                 return TradingSignal("NEUTRAL", 0, "메인 거래 조건 미충족", time_zone=time_zone)
+                # 매수 조건 확인
+
             
             elif time_zone == TimeZone.AFTERNOON:
-                # 13:00~15:00 - 매수 금지, 매도만
-                
-                # 13시 이후 최고가 업데이트
-                await self.update_13h_highest_price(stock_code, current_price)
+                # 13:00~15:00 오후 거래 (매도만)
                 
                 if qty_to_sell > 0:
                     should_sell, reason = await self.check_afternoon_sell_conditions(stock_code, current_price, tracking_data)
@@ -447,8 +501,6 @@ class SmartTrading:
             
         except Exception as e:
             logger.error(f"[{stock_code}] 거래 신호 생성 오류: {e}")
-            # 예외 발생도 에러로 간주하여 기록
-            await self.record_first_error_time(stock_code)
             return TradingSignal("NEUTRAL", 0, f"오류 발생: {str(e)}")
     
     async def execute_trade_order(self, stock_code: str) -> bool:
@@ -476,7 +528,6 @@ class SmartTrading:
                 result = await self._execute_sell_order(stock_code, signal.quantity, current_price)
             
             if result:
-                await self.increment_daily_trade_count(stock_code)
                 logger.info(f"✅ [{stock_code}] {signal.action} 주문 성공: {signal.quantity}주 @ {current_price} - {signal.reason}")
             
             return result
@@ -525,54 +576,19 @@ class SmartTrading:
             logger.error(f"매도 주문 실행 오류: {e}")
             return False
     
-    async def get_error_status(self, stock_code: str) -> dict:
-        """에러 상태 조회"""
-        try:
-            if stock_code not in self.error_start_times:
-                return {
-                    "has_error": False,
-                    "error_duration_seconds": 0,
-                    "remaining_seconds_until_sell": 0
-                }
-            
-            first_error_time = self.error_start_times[stock_code]
-            current_time = time.time()
-            elapsed_seconds = int(current_time - first_error_time)
-            remaining_seconds = max(0, self.constants.ERROR_DURATION_THRESHOLD - elapsed_seconds)
-            
-            return {
-                "has_error": True,
-                "first_error_time": datetime.fromtimestamp(first_error_time).strftime('%H:%M:%S'),
-                "error_duration_seconds": elapsed_seconds,
-                "error_duration_minutes": elapsed_seconds // 60,
-                "remaining_seconds_until_sell": remaining_seconds,
-                "will_sell_at": datetime.fromtimestamp(first_error_time + self.constants.ERROR_DURATION_THRESHOLD).strftime('%H:%M:%S') if remaining_seconds > 0 else "NOW"
-            }
-            
-        except Exception as e:
-            logger.error(f"[{stock_code}] 에러 상태 조회 실패: {e}")
-            return {"has_error": False, "error": str(e)}
-
     async def get_trading_status(self, stock_code: str) -> dict:
-        """종목의 현재 거래 상태 조회 - 에러 정보 포함"""
+        """종목의 현재 거래 상태 조회"""
         try:
-            # 기존 정보들
             time_zone = self.get_current_time_zone()
-            daily_count = await self.get_daily_trade_count(stock_code)
+            is_completed = await self.is_daily_trade_completed(stock_code)
             analysis_data = await self.stock_data_analyzer.analyze_stock_0b(stock_code)
             tracking_data = await self.price_tracker.get_tracking_data(stock_code)
-            highest_13h = await self.get_13h_highest_price(stock_code)
             signal = await self.generate_trading_signal(stock_code)
-            
-            # 에러 상태 추가
-            error_status = await self.get_error_status(stock_code)
             
             return {
                 "stock_code": stock_code,
                 "time_zone": time_zone,
-                "daily_trade_count": daily_count,
-                "highest_after_13h": highest_13h,
-                "error_status": error_status,  # 에러 정보 추가
+                "daily_trade_completed": is_completed,
                 "signal": {
                     "action": signal.action,
                     "quantity": signal.quantity,
@@ -585,7 +601,7 @@ class SmartTrading:
                     "execution_strength": analysis_data.get("latest_data", {}).get("execution_strength", 0) if analysis_data else 0,
                     "current_price": analysis_data.get("latest_data", {}).get("current_price", 0) if analysis_data else 0
                 },
-                "timestamp": datetime.now(self.timezone).isoformat()
+                "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
             }
             
         except Exception as e:
@@ -593,5 +609,5 @@ class SmartTrading:
             return {
                 "stock_code": stock_code,
                 "error": str(e),
-                "timestamp": datetime.now(self.timezone).isoformat()
+                "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
             }

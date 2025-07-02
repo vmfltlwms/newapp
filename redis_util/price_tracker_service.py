@@ -170,7 +170,8 @@ class PriceTracker:
  
         try:
             redis_key = self._get_redis_key(stock_code)
-            
+            td = await self.get_tracking_data(stock_code)
+            update_data = td.get("trade_price",0)
             # 기존 데이터 존재 확인
             if not await self.redis_db.exists(redis_key):
                 logger.debug(f"종목 {stock_code}의 가격 추적 데이터가 없습니다.")
@@ -219,14 +220,16 @@ class PriceTracker:
                     # 최고가 갱신
                     if current_price > highest_price:
                         update_fields["highest_price"] = str(current_price)
-                        # logger.info(f"📈 최고가 갱신 - 종목: {stock_code}, "
-                                  #  f"{highest_price} → {current_price}")
-                    
+                        logger.info(f"📈 최고가 갱신 - 종목: {stock_code}, "
+                                   f"{highest_price} → {current_price}"
+                                   f"거래가 → {update_data}"
+                                   )
                     # 최저가 갱신
                     if current_price < lowest_price:
                         update_fields["lowest_price"] = str(current_price)
                         logger.info(f"📉 최저가 갱신 - 종목: {stock_code}, "
-                                   f"{lowest_price} → {current_price}")
+                                   f"{lowest_price} → {current_price}"
+                                    f"거래가 → {update_data}")
             
             # 나머지 필드들 업데이트
             if qty_to_sell is not None:

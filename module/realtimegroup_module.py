@@ -1,10 +1,9 @@
 # api/realtime_group_module.py
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from dependency_injector.wiring import inject, Provide
 from sqlmodel import select
 from db.postgres_db import PostgresDB
 from container.postgres_container import Postgres_Container
-# from models.realtime_group_model import Realtime_Group  # 실제 모델 파일명에 맞게 수정
 from schemas.realtime_group_schema import Realtime_Group
 
 @inject
