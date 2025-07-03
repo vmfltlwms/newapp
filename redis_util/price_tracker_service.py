@@ -159,8 +159,8 @@ class PriceTracker:
     async def update_tracking_data(self, 
                                   stock_code: str,
                                   current_price: Optional[int] = None,
-                                  highest_price: Optional[int] = None,
-                                  lowest_price: Optional[int] = None,
+                                  # highest_price: Optional[int] = None,
+                                  # lowest_price: Optional[int] = None,
                                   trade_price: Optional[int] = None,
                                   qty_to_sell: Optional[int] = None,
                                   qty_to_buy: Optional[int] = None,
@@ -233,13 +233,13 @@ class PriceTracker:
                                    f"{lowest_price} → {current_price}"
                                     f"거래가 → {update_data}")
                         
-            if highest_price is not None:
-                update_fields["highest_price"] = str(highest_price)
-                updated = True
+            # if highest_price is not None:
+            #     update_fields["highest_price"] = str(highest_price)
+            #     updated = True
                 
-            if lowest_price is not None:
-                update_fields["lowest_price"] = str(lowest_price)
-                updated = True
+            # if lowest_price is not None:
+            #     update_fields["lowest_price"] = str(lowest_price)
+            #     updated = True
               
             # 나머지 필드들 업데이트
             if qty_to_sell is not None:

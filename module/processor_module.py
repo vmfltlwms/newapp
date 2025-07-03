@@ -69,11 +69,11 @@ class ProcessorModule:
         self.order_tracker ={}
         self.order_execution_tracker = {}  # 새로운 추적용
         
-        self.StockDataAnalyzer = StockDataAnalyzer(self.redis_db)
+        self.SA = StockDataAnalyzer(self.redis_db)
         self.PT = PriceTracker(self.redis_db)
         self.ST = SmartTrading( self.kiwoom_module, 
                                 self.PT, 
-                                self.StockDataAnalyzer,
+                                self.SA,
                                 self.redis_db )
         
         self.trnm_callback_table = {
@@ -204,6 +204,24 @@ class ProcessorModule:
             raise
         except Exception as e:
             logger.error(f"❌ [{stock_code}] 거래 실행기 예외: {e}")
+
+    async def run_analysis_scheduler(self, stock_codes: List[str]):
+        """전체 종목 통합 분석 - 30초마다"""
+        logger.info(f"📊 분석 스케줄러 시작 - {len(stock_codes)}개 종목")
+        
+        while self.running:
+            try:
+                if self.is_market_time():
+                    success_count, total_count = await self.SA.batch_process_stocks(stock_codes)
+                    logger.debug(f"✅ 분석 완료: {success_count}/{total_count}")
+                else:
+                    logger.debug("⏰ 장외 시간 - 분석 스킵")
+                
+                await asyncio.sleep(30)
+                
+            except Exception as e:
+                logger.error(f"❌ 분석 스케줄러 오류: {e}")
+                await asyncio.sleep(30)
 
     # 클린 deposit
     async def clean_deposit(self) -> int :
@@ -899,7 +917,7 @@ class ProcessorModule:
             
             # 🆕 조건검색 종목들에 대해 거래 태스크 생성
             tasks = []
-            for code in condition_stock_codes:
+            for code in all_stock_codes :
                 try:
                     # 트래킹 초기화
                     await self.PT.initialize_tracking( 
@@ -913,13 +931,15 @@ class ProcessorModule:
                         trade_type = "HOLD" 
                     )
                     
-                    # 🎯 trader_executor 백그라운드 task 등록
                     task = asyncio.create_task(self.trader_executor(code))
                     tasks.append(task)
-                    # logger.info(f"🚀 [{code}] 거래 태스크 생성")
-
+                
                 except Exception as e:
                     logger.error(f"❌ 종목 {code} 초기화 오류: {str(e)}")
+                    
+                # 2️⃣ 분석 스케줄러 (1개만)
+            analysis_task = asyncio.create_task(self.run_analysis_scheduler(all_stock_codes))
+            tasks.append(analysis_task)
 
             # 🆕 생성된 태스크들을 클래스 변수에 저장 (shutdown에서 정리하기 위해)
             self.trading_tasks = tasks

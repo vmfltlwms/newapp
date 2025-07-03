@@ -1,12 +1,13 @@
 from asyncio.log import logger
-import logging
-import time
-import json
+import logging, time, json
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from dependency_injector.wiring import inject, Provide
 from container.redis_container import Redis_Container
 from db.redis_db import RedisDB
+import pandas as pd
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +18,22 @@ class StockDataAnalyzer:
     def __init__(self, 
                 redis_db: RedisDB = Provide[Redis_Container.redis_db]):
         self.redis_db = redis_db
-        
-    def _get_redis_key(self, stock_code: str, type_code: str = "0B") -> str:
-        """Redis 키 생성 - socket_module과 동일한 형식"""
-        return f"redis:{type_code}:{stock_code}"
-        
+        self.REDIS_KEY_PREFIX = "PD"
+        self.EXPIRE_TIME = 60 * 30  # 30분
+        # 최소 데이터 요구사항
+        self.MIN_DATA = {
+            "1min": 3,
+            "5min": 15, 
+            "10min": 30
+        }
+
+    def _get_redis_key(self, stock_code: str, type_code : str, time_key:Optional[str] = None) -> str:
+
+        if time_key :
+            return f"redis:{type_code}:{stock_code}:{time_key}"
+        else : return f"redis:{type_code}:{stock_code}"
+      
+      
     def parse_execution_time(self, execution_time_str: str) -> float:
         """체결시간 문자열을 유닉스 타임스탬프로 변환"""
         if not execution_time_str or len(execution_time_str) != 6:
@@ -115,266 +127,310 @@ class StockDataAnalyzer:
                     logger.error(f"0B 데이터 처리 중 오류: {e}")
                     continue
 
-            # logger.info(f"종목 {stock_code}: {len(results)}개의 0B 데이터 조회됨 (최근 {seconds}초)")
             return results
             
         except Exception as e:
             logger.error(f"Redis에서 데이터 조회 실패 - 종목: {stock_code}, 오류: {e}")
             return []
         
-    def calculate_5min_execution_strength(self, data_list: List[dict]) -> float:
-        """5분간 체결강도 계산 (가중평균)"""
-        if not data_list:
-            return 0.0
+    async def get_price_dataframe(self, stock_code: str) -> pd.DataFrame:
+        """11분간 데이터를 DataFrame으로 조회"""
         
-        total_strength = 0.0
-        total_volume = 0
+        # 11분 = 660초
+        raw_data = await self.get_recent_0b_data(stock_code, 660)
+
+        if not raw_data:
+            logging.warning(f"No data received for stock_code: {stock_code}")
+            return pd.DataFrame()
         
-        for data in data_list:
-            volume = abs(data.get('volume', 0))
-            strength = data.get('execution_strength', 0)
-            
-            if volume > 0 and strength > 0:
-                total_strength += strength * volume
-                total_volume += volume
-        
-        if total_volume == 0:
-            return 0.0
-        
-        return round(total_strength / total_volume, 2)
-    
-    def calculate_volume_metrics(self, data_list: List[dict]) -> Tuple[int, int, int]:
-        """거래량 지표 계산"""
-        if not data_list:
-            return 0, 0, 0
-        
-        total_volume = 0      # 총 거래량
-        buy_volume = 0        # 매수 거래량
-        sell_volume = 0       # 매도 거래량
-        
-        for data in data_list:
-            volume = data.get('volume', 0)
-            total_volume += abs(volume)
-            
-            if volume > 0:  # 양수면 매수
-                buy_volume += volume
-            elif volume < 0:  # 음수면 매도
-                sell_volume += abs(volume)
-        
-        return total_volume, buy_volume, sell_volume
-    
-    def calculate_price_momentum(self, data_list: List[dict]) -> dict:
-        """가격 모멘텀 계산"""
-        if len(data_list) < 2:
-            return {
-                "price_change": 0,
-                "price_change_rate": 0.0,
-                "momentum": "FLAT"
-            }
-        
-        # 최신 데이터와 가장 오래된 데이터 비교
-        latest = data_list[-1]
-        oldest = data_list[0]
-        
-        latest_price = latest.get('current_price', 0)
-        oldest_price = oldest.get('current_price', 0)
-        
-        if oldest_price == 0:
-            return {
-                "price_change": 0,
-                "price_change_rate": 0.0,
-                "momentum": "FLAT"
-            }
-        
-        price_change = latest_price - oldest_price
-        price_change_rate = (price_change / oldest_price) * 100
-        
-        if price_change > 0:
-            momentum = "UP"
-        elif price_change < 0:
-            momentum = "DOWN"
-        else:
-            momentum = "FLAT"
-        
-        return {
-            "price_change": price_change,
-            "price_change_rate": round(price_change_rate, 2),
-            "momentum": momentum
-        }
-    
-    def calculate_additional_metrics(self, data_list: List[dict]) -> dict:
-        """추가 지표 계산"""
-        if not data_list:
-            return {
-                "avg_execution_strength": 0.0,
-                "max_volume": 0,
-                "min_volume": 0,
-                "price_volatility": 0.0
-            }
-        
-        # 평균 체결강도
-        strengths = [data.get('execution_strength', 0) for data in data_list if data.get('execution_strength', 0) > 0]
-        avg_strength = sum(strengths) / len(strengths) if strengths else 0.0
-        
-        # 거래량 최대/최소
-        volumes = [abs(data.get('volume', 0)) for data in data_list]
-        max_volume = max(volumes) if volumes else 0
-        min_volume = min(volumes) if volumes else 0
-        
-        # 가격 변동성 (표준편차)
-        prices = [data.get('current_price', 0) for data in data_list if data.get('current_price', 0) > 0]
-        if len(prices) > 1:
-            avg_price = sum(prices) / len(prices)
-            variance = sum((p - avg_price) ** 2 for p in prices) / len(prices)
-            volatility = variance ** 0.5
-        else:
-            volatility = 0.0
-        
-        return {
-            "avg_execution_strength": round(avg_strength, 2),
-            "max_volume": max_volume,
-            "min_volume": min_volume,
-            "price_volatility": round(volatility, 2)
-        }
-    
-    async def analyze_stock_0b(self, stock_code: str) -> dict:
-        """종목의 0B 데이터 종합 분석 - Redis에서 데이터를 읽어와 분석"""
         try:
-            # Redis에서 데이터 조회
-            data_5min = await self.get_recent_0b_data(stock_code, 300)  # 5분
-            data_1min = await self.get_recent_0b_data(stock_code, 60)   # 1분
+            # DataFrame 생성
+            df = pd.DataFrame(raw_data)
             
-            if not data_5min:
-                return {
-                    "stock_code": stock_code,
-                    "error": "No data available",
-                    "timestamp": time.time(),
-                    "message": f"종목 {stock_code}의 0B 데이터가 없습니다."
-                }
+            # 필요한 컬럼이 있는지 확인
+
+            required_columns = [ 'current_price', 'volume', 'acc_volume', 
+                  'open_price', 'execution_strength', 'buy_ratio']
             
-            # 최신 데이터
-            latest_data = data_5min[-1] if data_5min else {}
+            # execution_time을 datetime으로 변환하고 인덱스로 설정
+            df['execution_time'] = pd.to_datetime(df['execution_time'], unit='s')
+            df.set_index('execution_time', inplace=True)
+            df.sort_index(inplace=True)
+            df = df[required_columns]
             
-            # 5분간 지표 계산
-            strength_5min = self.calculate_5min_execution_strength(data_5min)
-            total_vol_5min, buy_vol_5min, sell_vol_5min = self.calculate_volume_metrics(data_5min)
-            momentum_5min = self.calculate_price_momentum(data_5min)
-            additional_5min = self.calculate_additional_metrics(data_5min)
+            abs_columns = ['current_price', 'open_price', 'execution_strength', 'buy_ratio']
+            for col in abs_columns:
+                if col in df.columns:
+                    df[col] = df[col].abs()
             
-            # 1분간 지표 계산
-            strength_1min = self.calculate_5min_execution_strength(data_1min)
-            total_vol_1min, buy_vol_1min, sell_vol_1min = self.calculate_volume_metrics(data_1min)
-            momentum_1min = self.calculate_price_momentum(data_1min)
-            additional_1min = self.calculate_additional_metrics(data_1min)
-            
-            # 매수/매도 비율 계산
-            buy_ratio_5min = (buy_vol_5min / total_vol_5min * 100) if total_vol_5min > 0 else 0
-            sell_ratio_5min = (sell_vol_5min / total_vol_5min * 100) if total_vol_5min > 0 else 0
-            
-            buy_ratio_1min = (buy_vol_1min / total_vol_1min * 100) if total_vol_1min > 0 else 0
-            sell_ratio_1min = (sell_vol_1min / total_vol_1min * 100) if total_vol_1min > 0 else 0
-            
-            analysis_result = {
-                "stock_code": stock_code,
-                "timestamp": time.time(),
-                "latest_data": {
-                    "current_price": latest_data.get('current_price', 0),
-                    "execution_time": latest_data.get('execution_time', ''),
-                    "execution_strength": latest_data.get('execution_strength', 0),
-                    "volume": latest_data.get('volume', 0),
-                    "change_rate": latest_data.get('change_rate', 0),
-                    "buy_price": latest_data.get('buy_price', 0),
-                    "sell_price": latest_data.get('sell_price', 0),
-                },
-                "analysis_5min": {
-                    "execution_strength": strength_5min,
-                    "total_volume": total_vol_5min,
-                    "buy_volume": buy_vol_5min,
-                    "sell_volume": sell_vol_5min,
-                    "buy_ratio": round(buy_ratio_5min, 2),
-                    "sell_ratio": round(sell_ratio_5min, 2),
-                    "momentum": momentum_5min,
-                    "additional_metrics": additional_5min,
-                    "data_points": len(data_5min)
-                },
-                "analysis_1min": {
-                    "execution_strength": strength_1min,
-                    "total_volume": total_vol_1min,
-                    "buy_volume": buy_vol_1min,
-                    "sell_volume": sell_vol_1min,
-                    "buy_ratio": round(buy_ratio_1min, 2),
-                    "sell_ratio": round(sell_ratio_1min, 2),
-                    "momentum": momentum_1min,
-                    "additional_metrics": additional_1min,
-                    "data_points": len(data_1min)
-                }
-            }
-            
-            # logger.info(f"종목 {stock_code} 분석 완료 - 5분: {len(data_5min)}개, 1분: {len(data_1min)}개 데이터 처리")
-            return analysis_result
+            # 데이터 타입 최적화
+            df = df.astype({
+                'current_price': 'int32',
+                'volume': 'int32', 
+                'acc_volume': 'int64',  # 누적거래량은 클 수 있으므로 int64
+                'open_price': 'int32',
+                'execution_strength': 'float32',
+                'buy_ratio': 'float32'
+            }, errors='ignore')
+      
+        
+            logging.info(f"Successfully processed {len(df)} records for {stock_code}")
+            return df
             
         except Exception as e:
-            logger.error(f"종목 {stock_code} 분석 중 오류 발생: {e}")
-            return {
-                "stock_code": stock_code,
-                "error": str(e),
-                "timestamp": time.time()
-            }
+            logging.error(f"Error processing data for {stock_code}: {str(e)}")
+            return pd.DataFrame()
+    
+    def find_completed_minutes(self, df: pd.DataFrame) -> List[datetime]:
+        """완성된 분 찾기 - 빈 분 포함"""
+        if df.empty:
+            return []
+        df = df.sort_index()
+        start = df.index[0].floor('1min')
+        end = df.index[-1].floor('1min')
+        all_minutes = pd.date_range(start=start, end=end, freq='1min').to_list()
+        completed_minutes = all_minutes[:-1] if len(all_minutes) > 1 else []
+        
+        logger.debug(f"완료된 분: {[m.strftime('%H:%M') for m in completed_minutes]}")
+        
+        return completed_minutes
+    
+    def calculate_strength(self, volume_list: List[int]) -> float:
+        """체결강도 계산"""
+        
+        buy_volume = sum(v for v in volume_list if v > 0)
+        sell_volume = sum(abs(v) for v in volume_list if v < 0)
+        
+        if buy_volume == 0:
+            return 50.0
+        if sell_volume == 0:
+            return 150.0
+        strength = round(buy_volume / sell_volume, 2) * 100
+        strength = max(50,min(200, strength))
+        return round(strength, 2)
+    
+    def calculate_1min_data(self, df: pd.DataFrame, minute_time: datetime) -> Dict:
+        """특정 분의 1분 데이터 계산"""
+        
+        # 해당 분 데이터 추출 (00:00:00 ~ 00:00:59)
+        start_time = minute_time
+        end_time = minute_time + timedelta(minutes=1)
+        
+        minute_df = df[(df.index >= start_time) & (df.index < end_time)]
+        
+        if len(minute_df) < self.MIN_DATA["1min"]:
+            return {"status": "insufficient_data", "count": len(minute_df)}
+        
+        prices = minute_df['current_price']
+        volumes = minute_df['volume']
+            
+        return {
+            "timeframe": "1min",
+            "ohlc": {
+                "open": int(prices.iloc[0]),        # int()로 변환
+                "high": int(prices.max()),          # int()로 변환
+                "low": int(prices.min()),           # int()로 변환
+                "close": int(prices.iloc[-1]),      # int()로 변환
+                "avg": round(float(prices.mean()), 2)  # float()로 변환
+            },
+            "strength": self.calculate_strength(volumes.tolist()),
+            "volume": int(volumes.abs().sum()),     # int()로 변환
+            "data_count": len(minute_df),
+            "status": "completed"
+        }
+    
+    def calculate_5min_data(self, df: pd.DataFrame, current_minute: datetime) -> Dict:
+        """현재 분 기준 최근 5분 데이터 계산"""
+        
+        # 5분 전부터 현재 분까지
+        start_time = current_minute - timedelta(minutes=4)  # 4분 전
+        end_time = current_minute + timedelta(minutes=1)    # 현재 분 + 1분
+        
+        recent_5min_df = df[(df.index >= start_time) & (df.index < end_time)]
+        
+        if len(recent_5min_df) < self.MIN_DATA["5min"]:
+            return {"status": "insufficient_data", "count": len(recent_5min_df)}
+        
+        prices = recent_5min_df['current_price']
+        volumes = recent_5min_df['volume']
+        
+        return {
+            "timeframe": "5min",
+            "avg_price": round(float(prices.mean()), 2),  # float()로 변환
+            "strength": self.calculate_strength(volumes.tolist()),
+            "volume": int(volumes.abs().sum()),           # int()로 변환
+            "data_count": len(recent_5min_df),
+            "status": "completed"
+        }
+        
+    def calculate_10min_data(self, df: pd.DataFrame, current_minute: datetime) -> Dict:
+        """현재 분 기준 최근 10분 데이터 계산"""
+        
+        # 10분 전부터 현재 분까지
+        start_time = current_minute - timedelta(minutes=9)  # 9분 전
+        end_time = current_minute + timedelta(minutes=1)    # 현재 분 + 1분
+        
+        recent_10min_df = df[(df.index >= start_time) & (df.index < end_time)]
+        
+        if len(recent_10min_df) < self.MIN_DATA["10min"]:
+            return {"status": "insufficient_data", "count": len(recent_10min_df)}
+        
+        prices = recent_10min_df['current_price']
+        volumes = recent_10min_df['volume']
+        
+        return {
+            "timeframe": "10min", 
+            "avg_price": round(float(prices.mean()), 2),  # float()로 변환
+            "strength": self.calculate_strength(volumes.tolist()),
+            "volume": int(volumes.abs().sum()),           # int()로 변환
+            "data_count": len(recent_10min_df),
+            "status": "completed"
+        }
+    
+    async def calculate_data(self, stock_code: str) -> bool:
+        """메인 계산 함수 - 30초마다 호출"""
+        
+        try:
+            # 1. 11분간 데이터 조회
+            df = await self.get_price_dataframe(stock_code)
+            if len(df) < 10:
+                logger.warning(f"[{stock_code}] 데이터 부족: {len(df)}개")
+                return False
+            
+            # 2. 완료된 분들 찾기
+            completed_minutes = self.find_completed_minutes(df)
+            
+            if not completed_minutes:
+                logger.debug(f"[{stock_code}] 완료된 분 없음")
+                return True
+            
+            # 3. 각 완료된 분에 대해 계산 및 저장
+            for minute_time in completed_minutes:
+                time_key = minute_time.strftime('%H:%M')
+                redis_key = self._get_redis_key(stock_code,self.REDIS_KEY_PREFIX, time_key)
+                
+                # 이미 저장된 데이터가 있는지 확인
+                existing_data = await self.redis_db.get(redis_key)
+                if existing_data:
+                    logger.debug(f"[{stock_code}] {time_key} 이미 처리됨")
+                    continue
+                
+                # 1분, 5분, 10분 데이터 계산
+                data_1min = self.calculate_1min_data(df, minute_time)
+                data_5min = self.calculate_5min_data(df, minute_time)
+                data_10min = self.calculate_10min_data(df, minute_time)
 
-    async def get_multiple_stock_analysis(self, stock_codes: List[str]) -> Dict[str, dict]:
-        """여러 종목의 0B 데이터 분석"""
-        results = {}
+                
+                # 결과 합치기
+                result = {
+                    "stock_code": stock_code,
+                    "time_key": time_key,
+                    "timestamp": minute_time.isoformat(),
+                    "1min": data_1min,
+                    "5min": data_5min,
+                    "10min": data_10min,
+                    "created_at": datetime.now().isoformat()
+                }
+                
+                # Redis에 저장
+                await self.redis_db.setex(
+                    redis_key,
+                    self.EXPIRE_TIME,
+                    json.dumps(result, ensure_ascii=False)
+                )
+                
+                logger.info(f"✅ [{stock_code}] {time_key} 데이터 저장 완료")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ [{stock_code}] 계산 실패: {e}")
+            return False
+    
+    async def get_latest_data(self, stock_code: str) -> Optional[Dict]:
+        """최신 데이터 조회 (매매 로직용)"""
+        
+        try:
+            # 최근 10분간의 키들 생성
+            now = datetime.now()
+            time_keys = []
+            
+            for i in range(10):
+                past_time = now - timedelta(minutes=i)
+                time_key = past_time.strftime('%H:%M')
+                logger.info(f"time_key => {time_key}")
+                time_keys.append(time_key)
+            
+            # Redis에서 최신 데이터 찾기
+            for time_key in time_keys:
+                redis_key = self._get_redis_key(stock_code,self.REDIS_KEY_PREFIX, time_key)
+                
+                logger.info(f"redis_key  => {redis_key}")
+                data = await self.redis_db.get(redis_key)
+                logger.info(f"redis_key data => {data}")
+
+                if data:
+                    return json.loads(data)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ [{stock_code}] 최신 데이터 조회 실패: {e}")
+            return None
+    
+    async def get_trading_data(self, stock_code: str) -> Optional[Dict]:
+        """매매용 지표 조회"""
+        
+        latest_data = await self.get_latest_data(stock_code)
+        if not latest_data:
+            return None
+        
+        # 1분 OHLC 데이터 안전 추출
+        ohlc_1min = latest_data["1min"].get("ohlc", {}) if latest_data["1min"]["status"] == "completed" else {}
+        
+        return {
+            "stock_code": stock_code,
+            "time_key": latest_data["time_key"],
+            "1min_strength": latest_data["1min"].get("strength", 100),
+            "5min_strength": latest_data["5min"].get("strength", 100),
+            "10min_strength": latest_data["10min"].get("strength", 100),
+            "1min_open": ohlc_1min.get("open"),
+            "1min_high": ohlc_1min.get("high"),
+            "1min_low": ohlc_1min.get("low"),
+            "1min_close": ohlc_1min.get("close"),
+            "1min_avg": ohlc_1min.get("avg"),
+            "5min_avg": latest_data["5min"].get("avg_price") if latest_data["5min"]["status"] == "completed" else None,
+            "10min_avg": latest_data["10min"].get("avg_price") if latest_data["10min"]["status"] == "completed" else None,
+            "data_quality": {
+                "1min": latest_data["1min"]["status"],
+                "5min": latest_data["5min"]["status"], 
+                "10min": latest_data["10min"]["status"]
+            }
+        }
+    
+    async def batch_process_stocks(self, stock_codes: List[str]) -> Tuple[int, int]:
+        """종목 일괄 처리"""
+        
+        success_count = 0
+        total_count = len(stock_codes)
+        
+        logger.info(f"📊 {total_count}개 종목 처리 시작")
+        start_time = time.time()
         
         for stock_code in stock_codes:
             try:
-                analysis = await self.analyze_stock_0b(stock_code)
-                results[stock_code] = analysis
+                success = await self.calculate_data(stock_code)
+                if success:
+                    success_count += 1
+                    
             except Exception as e:
-                logger.error(f"종목 {stock_code} 분석 실패: {e}")
-                results[stock_code] = {
-                    "stock_code": stock_code,
-                    "error": str(e),
-                    "timestamp": time.time()
-                }
+                logger.error(f"❌ [{stock_code}] 처리 오류: {e}")
         
-        return results
-
-    async def get_data_status(self, stock_code: str) -> dict:
-        """특정 종목의 데이터 상태 확인"""
-        redis_key = self._get_redis_key(stock_code, "0B")
+        elapsed_time = time.time() - start_time
+        logger.info(f"📊 처리 완료 - 성공: {success_count}/{total_count}, "
+                   f"소요시간: {elapsed_time:.2f}초")
         
-        try:
-            # 전체 데이터 개수
-            total_count = await self.redis_db.zcard(redis_key)
-            
-            # 최근 5분간 데이터 개수
-            now = time.time()
-            recent_5min = await self.redis_db.zcount(redis_key, now - 300, now)
-            recent_1min = await self.redis_db.zcount(redis_key, now - 60, now)
-            
-            # 가장 최근 데이터와 가장 오래된 데이터의 시간
-            oldest_data = await self.redis_db.zrange(redis_key, 0, 0, withscores=True)
-            newest_data = await self.redis_db.zrange(redis_key, -1, -1, withscores=True)
-            
-            oldest_time = oldest_data[0][1] if oldest_data else None
-            newest_time = newest_data[0][1] if newest_data else None
-            
-            return {
-                "stock_code": stock_code,
-                "redis_key": redis_key,
-                "total_data_points": total_count,
-                "recent_5min_points": recent_5min,
-                "recent_1min_points": recent_1min,
-                "oldest_data_time": oldest_time,
-                "newest_data_time": newest_time,
-                "data_span_seconds": (newest_time - oldest_time) if (oldest_time and newest_time) else 0,
-                "timestamp": time.time()
-            }
-            
-        except Exception as e:
-            logger.error(f"종목 {stock_code} 데이터 상태 확인 실패: {e}")
-            return {
-                "stock_code": stock_code,
-                "error": str(e),
-                "timestamp": time.time()
-            }
+        return success_count, total_count
+        
+        
+        

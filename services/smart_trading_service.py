@@ -22,8 +22,8 @@ class TradingConstants:
     MONITOR_START: datetime_time = datetime_time(9, 0)   # 09:00
     MONITOR_END: datetime_time = datetime_time(9, 5)     # 09:05
     GAP_TRADING_START: datetime_time = datetime_time(9, 5)   # 09:05
-    GAP_TRADING_END: datetime_time = datetime_time(9, 30)    # 09:30
-    MAIN_TRADING_START: datetime_time = datetime_time(9, 30) # 09:30
+    GAP_TRADING_END: datetime_time = datetime_time(10, 30)    # 09:30
+    MAIN_TRADING_START: datetime_time = datetime_time(10, 30) # 09:30
     MAIN_TRADING_END: datetime_time = datetime_time(13, 0)   # 13:00
     AFTERNOON_START: datetime_time = datetime_time(13, 0)    # 13:00
     AFTERNOON_END: datetime_time = datetime_time(15, 0)      # 15:00
@@ -58,7 +58,6 @@ class TradingSignal:
     reason: str
     confidence: float = 0.0
     time_zone: str = ""
-    analysis_data: dict = None
 
 
 class TimeZone:
@@ -160,7 +159,10 @@ class SmartTrading:
 
             # 가장 최신 데이터에서 누적거래대금 조회
             latest_data = data_list[-1]
-            acc_amount = latest_data.get("acc_amount", 0)  # 파싱된 데이터의 acc_amount 사용
+            logger.info(f"latest_data \n {latest_data}")
+            acc_volume = latest_data.get("acc_volume", 0)        # 파싱된 데이터의 acc_volume 사용
+            current_price = latest_data.get("current_price", 0)  # 파싱된 데이터의 current_price 사용
+            acc_amount = acc_volume * current_price              # acc_amount의 단위를 몰라서
             
             if acc_amount <= 0:
                 logger.debug(f"[{stock_code}] 누적거래대금 없음: {acc_amount}")
@@ -210,7 +212,7 @@ class SmartTrading:
             # ✅ 수정: 0B 원시 데이터에서 직접 조회
             data_list = await self.stock_data_analyzer.get_recent_0b_data(stock_code, 60)
             if not data_list:
-                logger.debug(f"[{stock_code}] 0B 데이터 없음")
+                logger.info(f"[{stock_code}] 0B 데이터 없음")
                 return False
                 
             latest_raw_data = data_list[-1]
@@ -218,13 +220,13 @@ class SmartTrading:
             # 1. 체결강도 확인
             execution_strength = latest_raw_data.get('execution_strength', 0)
             if execution_strength < self.constants.GAP_EXECUTION_STRENGTH_MIN :  # 150 이상
-                logger.debug(f"[{stock_code}] 체결강도 부족: {execution_strength} < {self.constants.GAP_EXECUTION_STRENGTH_MIN}")
+                logger.info(f"[{stock_code}] 체결강도 부족: {execution_strength} < {self.constants.GAP_EXECUTION_STRENGTH_MIN}")
                 return False
             
             # 2. 5분간 평균 거래대금 확인
             avg_trade_amount = await self.get_5min_average_trade_amount(stock_code, data_list)
             if avg_trade_amount < self.constants.GAP_AVG_TRADE_AMOUNT_MIN:
-                logger.debug(f"[{stock_code}] 거래대금 부족: {avg_trade_amount:,} < {self.constants.GAP_AVG_TRADE_AMOUNT_MIN:,}")
+                logger.info(f"[{stock_code}] 거래대금 부족: {avg_trade_amount:,} < {self.constants.GAP_AVG_TRADE_AMOUNT_MIN:,}")
                 return False
             
             # 3. 시가 대비 상승률 확인
@@ -232,17 +234,17 @@ class SmartTrading:
             open_price = latest_raw_data.get('open_price', 0)
             
             if open_price <= 0:
-                logger.debug(f"[{stock_code}] 시가 데이터 없음: {open_price}")
+                logger.info(f"[{stock_code}] 시가 데이터 없음: {open_price}")
                 return False
             
             if current_price <= 0:
-                logger.debug(f"[{stock_code}] 현재가 데이터 없음: {current_price}")
+                logger.info(f"[{stock_code}] 현재가 데이터 없음: {current_price}")
                 return False
             
             open_rise = self.safe_percentage_change(current_price, open_price)
             
             if open_rise < self.constants.GAP_OPEN_RISE_MIN:
-                logger.debug(f"[{stock_code}] 시가 상승률 부족: {open_rise:.2f}% < {self.constants.GAP_OPEN_RISE_MIN}%")
+                logger.info(f"[{stock_code}] 시가 상승률 부족: {open_rise:.2f}% < {self.constants.GAP_OPEN_RISE_MIN}%")
                 return False
             
             logger.info(f"[{stock_code}] ✅ 갭상승 조건 충족: 체결강도={execution_strength:.1f}, "
@@ -285,21 +287,54 @@ class SmartTrading:
             logger.error(f"[{stock_code}] 갭상승 매도 조건 확인 오류: {e}")
             return False, "조건 확인 실패"
     
+    # smart_trading_service.py 수정
     async def check_main_trading_conditions(self, stock_code: str, analysis_data: dict) -> int:
-        """메인 시간대 매매 조건 확인 (기존 로직 사용)"""
+        """메인 시간대 매매 조건 확인"""
         try:
-            analysis_1min = analysis_data.get("analysis_1min", {})
+            # ✅ None 체크 추가
+            if not analysis_data:
+                logger.warning(f"[{stock_code}] 분석 데이터 없음")
+                return 0
+                        
+            strength_1min   = analysis_data.get('1min_strength', 0)
+            strength_5min   = analysis_data.get('5min_strength', 0)
+            strength_10min  = analysis_data.get('10min_strength', 0)
+            avg_1min        = analysis_data.get('1min_avg', 0)
+            avg_5min        = analysis_data.get('5min_avg', 0)
+            avg_10min       = analysis_data.get('10min_avg', 0)
             
-            strength_1min = analysis_1min.get('execution_strength', 0)
-            momentum_1min = analysis_1min.get('momentum', {}).get('momentum', 'FLAT')
-            buy_ratio_1min = analysis_1min.get('buy_ratio', 50)
+            # None 값 처리
+            strength_1min = strength_1min if strength_1min is not None else 100
+            strength_5min = strength_5min if strength_5min is not None else 100
+            strength_10min = strength_10min if strength_10min is not None else 100
+            avg_1min = avg_1min if avg_1min is not None else 0
+            avg_5min = avg_5min if avg_5min is not None else 0
+            avg_10min = avg_10min if avg_10min is not None else 0
             
-            # 신호 강도 계산 (기존 로직)
-            if strength_1min > 120 and momentum_1min == 'UP' and buy_ratio_1min > 60:
+            # 데이터 품질 확인
+            data_quality = analysis_data.get('data_quality', {})
+            if (data_quality.get('1min') != 'completed' or 
+                data_quality.get('5min') != 'completed'):
+                logger.warning(f"[{stock_code}] 데이터 품질 부족: {data_quality}")
+                return 0
+
+            logger.debug(f"[{stock_code}] 신호: S1={strength_1min}, S5={strength_5min}, S10={strength_10min}, "
+                        f"A1={avg_1min}, A5={avg_5min}, A10={avg_10min}")
+
+            # 신호 강도 계산
+            if (strength_1min > strength_5min > strength_10min and 
+                avg_1min > avg_5min > avg_10min and 
+                strength_5min > 120):
                 return 3  # 강한 매수
-            elif strength_1min > 100 and buy_ratio_1min > 55:
+                
+            elif (strength_1min > strength_5min and 
+                  avg_1min > avg_5min and 
+                  strength_1min > 120):
                 return 2  # 일반 매수
-            elif strength_1min < 80 and momentum_1min == 'DOWN' and buy_ratio_1min < 40:
+                
+            elif (strength_1min < strength_5min < strength_10min and 
+                  avg_1min < avg_5min < avg_10min and 
+                  strength_5min < 80):
                 return -2  # 매도
             else:
                 return 0  # 중립
@@ -307,7 +342,7 @@ class SmartTrading:
         except Exception as e:
             logger.error(f"[{stock_code}] 메인 거래 조건 확인 오류: {e}")
             return 0
-    
+
     async def check_holding_zone(self,current_price: float, trade_price: float) -> bool:
         """홀딩 존 확인 (±2%) - 메인 거래 시간용"""
         try:
@@ -361,7 +396,7 @@ class SmartTrading:
             logger.error(f"수익구간 조건 확인 오류: {e}")
             return True, "시스템 오류로 인한 안전 매도"
     
-    async def check_afternoon_sell_conditions(self, stock_code: str, current_price: float, tracking_data: dict) -> tuple:
+    def check_afternoon_sell_conditions(self, stock_code: str, current_price: float, tracking_data: dict) -> tuple:
         """
         오후 매도 조건 확인 (13:00~15:00)
         
@@ -396,7 +431,7 @@ class SmartTrading:
         try:
             # 1. 현재 시간대 확인
             time_zone = self.get_current_time_zone()
-            
+            logger.info(f"time zone  = >{time_zone}")
             # 2. 일일 거래 완료 여부 확인
             is_completed = await self.is_daily_trade_completed(stock_code)
             if is_completed:
@@ -405,6 +440,7 @@ class SmartTrading:
             # ✅ 3. tracking_data에서 모든 정보 조회
             tracking_data = await self.price_tracker.get_tracking_data(stock_code)
             if not tracking_data:
+                logger.info("No tracking data")
                 return TradingSignal("NEUTRAL", 0, "추적 데이터 없음", time_zone=time_zone)
             
             # ✅ tracking_data에서 모든 필요한 데이터 추출
@@ -413,13 +449,15 @@ class SmartTrading:
             current_price = tracking_data.get('current_price', 0)
             trade_price = tracking_data.get('trade_price', 0)
             highest_price = tracking_data.get('highest_price', 0)
+            
             if current_price <= 0:
                 return TradingSignal("NEUTRAL", 0, "현재가 정보 없음", time_zone=time_zone)
             
             # 4. 분석 데이터 조회
-            analysis_data = await self.stock_data_analyzer.analyze_stock_0b(stock_code)
+            analysis_data = await self.stock_data_analyzer.get_trading_data(stock_code)
             if not analysis_data or "error" in analysis_data:
-                return TradingSignal("NEUTRAL", 0, "데이터 없음", time_zone=time_zone)
+                logger.info(f"{analysis_data} analysis_data 가 없다")
+                # return TradingSignal("NEUTRAL", 0, "데이터 없음", time_zone=time_zone)
             
             # 6. 현재가 확인
             if current_price <= 0:
@@ -435,17 +473,17 @@ class SmartTrading:
             
             elif time_zone == TimeZone.GAP_TRADING:
                 # 09:05~09:30 갭상승 매수/매도
-                
+                logger.info(f"{stock_code} => {qty_to_buy}, {qty_to_sell}")
                 # 매도 조건 확인 (보유 중일 때)
                 if qty_to_sell > 0:  # current_price 는 전달 안해도 됨
-                    should_sell, reason = await self.check_gap_sell_conditions(stock_code, current_price, tracking_data)
+                    should_sell, reason = self.check_gap_sell_conditions(stock_code, current_price, tracking_data)
                     if should_sell:
-                        return TradingSignal("SELL", qty_to_sell, f"갭상승 {reason}", time_zone=time_zone, analysis_data=analysis_data)
+                        return TradingSignal("SELL", qty_to_sell, f"갭상승 {reason}", time_zone=time_zone)
                 
                 # 매수 조건 확인
                 if qty_to_buy > 0:
                     if await self.check_gap_trading_conditions(stock_code):
-                        return TradingSignal("BUY", qty_to_buy, "갭상승 매수 조건 충족", time_zone=time_zone, analysis_data=analysis_data)
+                        return TradingSignal("BUY", qty_to_buy, "갭상승 매수 조건 충족", time_zone=time_zone)
                 
                 return TradingSignal("NEUTRAL", 0, "갭상승 조건 미충족", time_zone=time_zone)
             
@@ -465,9 +503,9 @@ class SmartTrading:
                         
                         if change_rate > self.constants.HOLDING_ZONE_THRESHOLD:
                             # 상승해서 홀딩존을 벗어난 경우: 수익실현 조건 확인
-                            should_sell, reason = await self.check_profit_zone_conditions(stock_code, current_price, trade_price, highest_price)
+                            should_sell, reason = self.check_profit_zone_conditions(current_price, trade_price, highest_price)
                             if should_sell:
-                                return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone, analysis_data=analysis_data)
+                                return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone)
                             # 수익실현 조건 미충족시 계속 보유
                             return TradingSignal("NEUTRAL", 0, f"수익구간 보유 중 ({change_rate:.2f}%)", time_zone=time_zone)
                         
@@ -479,7 +517,7 @@ class SmartTrading:
                 if qty_to_buy > 0:
                     signal_strength = await self.check_main_trading_conditions(stock_code, analysis_data)
                     if signal_strength >= 2:
-                        return TradingSignal("BUY", qty_to_buy, f"메인 매수 신호: {signal_strength}", time_zone=time_zone, analysis_data=analysis_data)
+                        return TradingSignal("BUY", qty_to_buy, f"메인 매수 신호: {signal_strength}", time_zone=time_zone)
                 
                 return TradingSignal("NEUTRAL", 0, "메인 거래 조건 미충족", time_zone=time_zone)
                 # 매수 조건 확인
@@ -489,9 +527,9 @@ class SmartTrading:
                 # 13:00~15:00 오후 거래 (매도만)
                 
                 if qty_to_sell > 0:
-                    should_sell, reason = await self.check_afternoon_sell_conditions(stock_code, current_price, tracking_data)
+                    should_sell, reason = self.check_afternoon_sell_conditions(stock_code, current_price, tracking_data)
                     if should_sell:
-                        return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone, analysis_data=analysis_data)
+                        return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone)
                 
                 return TradingSignal("NEUTRAL", 0, "오후 매도 조건 미충족", time_zone=time_zone)
             
