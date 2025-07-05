@@ -106,7 +106,6 @@ async def lifespan(app: FastAPI,):
     await kiwoom_module.initialize()
     await realtime_module.initialize()
     await processor_module.initialize() 
-    # await baseline_module.initialize()
     await step_manager_module.initialize()
     await realtime_group_module.initialize()
     await bridge_module.initialize()
@@ -123,7 +122,7 @@ async def lifespan(app: FastAPI,):
     # 조건검색 요청
     await realtime_module.get_condition_list()
     await processor_module.short_trading_handler()
-
+    
   
     yield # 실행 종료 구분
     

@@ -51,6 +51,7 @@ class ProcessorModule:
         self.realtime_module = realtime_module
         self.realtime_group_module = realtime_group_module
         self.running = False
+        self.isfirst = True
         self.count = 0 
         self.cancel_check_task = None 
         self.condition_list ={'kospi':set(),'kosdaq':set()} #조건검색 리스트
@@ -58,14 +59,14 @@ class ProcessorModule:
         # 🆕 거래 태스크 관리
         self.trading_tasks = []  # 개별 종목 거래 태스크들
         self.timezone = pytz.timezone('Asia/Seoul')
+        self.ping_counter = 0
 
         self.holding_stock =[]           # 현재 보유중인 주식
-        self.account_info ={}            # 현재 보유중인 주식
+        self.account_info ={}            # 현재 보유중인 주식 / 처음 실행할 때 매도 수량 관리용
         self.stock_qty = {}              # 현재 주식별 보유 수량 관리
         self.deposit = 0                 # 예수금
         self.assigned_per_stock = 0      # 각 주식별 거래가능 금액
         self.account = []                # 내 주식 소유현황
-        self.prev_baseline_code = []     # 이전에 유지되고 있는 베이스라인 
         self.order_tracker ={}
         self.order_execution_tracker = {}  # 새로운 추적용
         
@@ -100,13 +101,14 @@ class ProcessorModule:
             # running을 True로 설정한 후 태스크 시작
             self.running = True
             self.holding_stock = await self.extract_stock_codes() # 현재 보유중인 주식 
+            self.isfirst = await self.isfirst_start() # 오늘 첫번째 실행인지 확인  
             # 🔧 수정: stock_qty 딕셔너리 명시적 초기화
             if not hasattr(self, 'stock_qty') or self.stock_qty is None:
                 self.stock_qty = {}
             
             # 계좌 수익률 정보로 현재 보유 주식 수량 초기화
             try:
-                await self.get_account_return()
+                await self.get_account_return()  # self.stock_qty 초기화 및 현재 보유 주식 업데이트
             except Exception as e:
                 self.stock_qty = {}  # 실패 시 빈 딕셔너리로 초기화
             
@@ -176,7 +178,7 @@ class ProcessorModule:
 
     async def trader_executor(self, stock_code: str):
         """개별 종목 거래 실행기 - 백그라운드에서 지속 실행"""
-        logger.info(f"🚀 [{stock_code}] 거래 실행기 시작")
+        # logger.info(f"🚀 [{stock_code}] 거래 실행기 시작")
         
         try:
             while self.running:
@@ -321,7 +323,6 @@ class ProcessorModule:
             if not hasattr(self, 'stock_qty'):
                 self.stock_qty = {}
             return self.stock_qty
-       
   
     async def receive_messages(self):
         logging.info("📥 Redis 채널 'chan'에서 메시지 수신 시작")
@@ -372,7 +373,10 @@ class ProcessorModule:
 
     async def trnm_callback_ping(self, response:dict):
         await self.socket_module.send_message(response)
-        logging.info('ping pong')
+        self.ping_counter +=1
+        if self.ping_counter // 5 == 1:
+            self.ping_counter = 0
+            logging.info('ping pong')
         
     async def trnm_callback_real(self, response:dict):
         data = response.get('data', [])
@@ -410,7 +414,6 @@ class ProcessorModule:
             logging.warning("빈 실시간 데이터 수신")
             return
         
-        # logging.info(f" {self.count} 번째 데이터 전체 데이터 수신 data \n {data}")
         # 🔧 수정: 배열의 모든 요소를 순회하여 처리
         for index, item in enumerate(data):
             try:
@@ -421,31 +424,51 @@ class ProcessorModule:
                 request_type = item.get('type')
                 request_item = item.get('item')
                 request_name = item.get('name')
-                if request_type != "0B":
-                    logger.info(f"호출된 타입 {request_type} 아이템 {request_item} 이름 {request_name} (인덱스: {index})")
+                
+                # 🆕 00 타입만 집중적으로 디버깅
+                if request_type in ["00", "04"]:
+                    logging.info(f"🔍 DEBUG [{request_type} 타입]: 수신된 데이터 - 아이템: {request_item}, 이름: {request_name}")
+                
 
                 # 해당 타입의 핸들러 찾기
                 handler = self.type_callback_table.get(request_type)
                 
                 if handler:
+                    # 🆕 00 타입만 핸들러 호출 로그
+                    if request_type in ["00","04"]:
+                        logging.info(f"🎯 [{request_type}타입] 핸들러 호출 시작")
+                    
                     await handler(item)
+
                 else:
+                    print(f"❌ 알 수 없는 실시간 타입: {request_type}")
                     logging.warning(f"알 수 없는 실시간 타입 수신: {request_type} (인덱스: {index})")
                     
             except Exception as e:
+                print(f"❌ 개별 데이터 처리 오류 (인덱스 {index}): {str(e)}")
                 logging.error(f"개별 데이터 처리 중 오류 (인덱스 {index}): {str(e)}")
                 logging.error(f"문제 데이터: {item}")
                 continue
-
+              
     async def type_callback_00(self, data: dict): 
         try:
+            # 🆕 함수 시작 로그 (00 타입만)
+            logging.info(f"🚀 [00타입] type_callback_00 함수 시작")
+            
             values = data.get('values', {})   
             stock_code = data.get('item')
             stock_code = stock_code[1:] if stock_code and stock_code.startswith('A') else stock_code
 
             if not stock_code:
-                logging.warning("주문체결 데이터에 종목코드(item)가 없습니다.")
                 return
+            
+            # 🆕 주요 데이터 추출 로그
+            order_number = values.get('9203', '0')
+            order_status = values.get('905', '')
+            order_state = values.get('913', '')
+            
+            logging.info(f"📋 [00타입] 주문체결 데이터 수신 - 종목: {stock_code}, 주문번호: {order_number}, 상태: {order_status}, 구분: {order_state}")
+ 
             
             # 필요한 필드만 추출 (안전한 기본값 설정)
             def safe_get_value(data_dict, key, default='0'):
@@ -488,11 +511,14 @@ class ProcessorModule:
             order_status = str(order_data.get('905', '')).strip()
             order_state = str(order_data.get('913', '')).strip()
             
+            # 🆕 주요 변수 로그
+            logging.info(f"📊 [00타입] 파싱 결과 - 주문량: {order_qty}, 체결량: {trade_qty}, 미체결: {untrade_qty}, 체결가: {execution_price}")
+            
             # 주문번호 유효성 검사
             if not order_number or order_number == '0':
-                logging.warning(f"유효하지 않은 주문번호: {order_number}")
+                logging.warning(f"[00타입] 유효하지 않은 주문번호: {order_number}")
                 return
-            
+                        
             # 증분 체결량 계산
             incremental_trade_qty = self.track_order_execution(order_number, order_qty, trade_qty, untrade_qty)
             
@@ -505,6 +531,7 @@ class ProcessorModule:
             is_buy_order = '매수' in order_status and not is_cancelled and not is_rejected
             is_sell_order = '매도' in order_status and not is_cancelled and not is_rejected
             
+
             # 1. 취소/거부 주문 처리
             if is_cancelled or is_rejected:
                 order_data['902'] = '0'  # 미체결수량 0으로 설정
@@ -611,6 +638,9 @@ class ProcessorModule:
                 
     async def type_callback_02(self, data: dict): 
         logger.info(data)
+                
+    async def type_callback_02(self, data: dict): 
+        logger.info(data)
         
     # 보유주식 수량 업데이트
     async def type_callback_04(self, data: dict):
@@ -689,6 +719,7 @@ class ProcessorModule:
                                                                   trade_price = trade_price, 
                                                                   period_type = False,
                                                                   isfirst = False,
+                                                                  isafternoon = False,
                                                                   qty_to_sell = current_qty_to_sell,
                                                                   qty_to_buy = qty_to_buy - current_qty_to_sell,
                                                                   trade_type = "HOLD" )
@@ -881,9 +912,7 @@ class ProcessorModule:
     # 🆕 수정된 short_trading_handler - 거래 태스크 생성
     async def short_trading_handler(self) : # 조건검색 으로 코드 등록 
         try:
-            isfirst = await self.isfirst_start() # 오늘 첫번째 실행인지 확인   
-            isfirst = 1 # 오늘 첫번째 실행인지 확인   
-            if isfirst :
+            if self.isfirst :
                 await self.realtime_group_module.delete_by_group(0)
                 await self.realtime_group_module.delete_by_group(1)
                 await self.realtime_group_module.create_new(group=0, data_type=[], stock_code=[])
@@ -895,27 +924,24 @@ class ProcessorModule:
                 await asyncio.sleep(0.3)
                 await self.realtime_module.request_condition_search(seq="1")
                 await asyncio.sleep(0.3)
-                holding_stocks_info = await self.kiwoom_module.get_account_info()
-                  # 계좌 정보에서 보유 주식 정보 추출
-                self.account_info = self.extract_holding_stocks_info(holding_stocks_info)
-            
+                
+            # 계좌 정보에서 보유 주식 정보 추출 / 매도수량 관리용
+            holding_stocks_info = await self.kiwoom_module.get_account_info()
+            self.account_info = self.extract_holding_stocks_info(holding_stocks_info)
+     
             # 조건 검색으로 만들어진 그룹   
             res = await self.realtime_group_module.get_all_groups()  
             
+            # 현재 보유주식과 조건검색에서 찾은 모든 코드를 통합 
             condition_stock_codes = [code for group in res for code in group.stock_code]
             all_stock_codes = list(set(condition_stock_codes + self.holding_stock)) 
             
-            await self.realtime_module.subscribe_realtime_price(group_no="0", 
-                        items=all_stock_codes, 
-                        data_types=["00","0B","04"], 
-                        refresh=True)
-
-            
+            # 각 종목별로 거래 가능금액 배당
             stock_qty = len(all_stock_codes)
             stock_qty =  stock_qty if stock_qty >= 1 else 50 
             self.assigned_per_stock = int(self.deposit / stock_qty)
             
-            # 🆕 조건검색 종목들에 대해 거래 태스크 생성
+            # 종목들에 대해 거래 태스크 생성
             tasks = []
             for code in all_stock_codes :
                 try:
@@ -926,6 +952,7 @@ class ProcessorModule:
                         trade_price = 0, 
                         period_type = False,
                         isfirst = True,
+                        isafternoon=True,
                         qty_to_sell = 0,
                         qty_to_buy = 0,
                         trade_type = "HOLD" 
@@ -937,15 +964,22 @@ class ProcessorModule:
                 except Exception as e:
                     logger.error(f"❌ 종목 {code} 초기화 오류: {str(e)}")
                     
-                # 2️⃣ 분석 스케줄러 (1개만)
+            logger.info(f"🎯 조건검색 완료: {len(all_stock_codes)}개 종목, {len(tasks)}개 거래 태스크 생성")
+            logger.info(f"💰 종목당 할당 금액: {self.assigned_per_stock:,}원")
+            
+            # 2️⃣ 분석 스케줄러 태스크 등록
             analysis_task = asyncio.create_task(self.run_analysis_scheduler(all_stock_codes))
             tasks.append(analysis_task)
 
             # 🆕 생성된 태스크들을 클래스 변수에 저장 (shutdown에서 정리하기 위해)
             self.trading_tasks = tasks
             
-            logger.info(f"🎯 조건검색 완료: {len(condition_stock_codes)}개 종목, {len(tasks)}개 거래 태스크 생성")
-            logger.info(f"💰 종목당 할당 금액: {self.assigned_per_stock:,}원")
+            # 실시간 종목 등록 
+            await self.realtime_module.subscribe_realtime_price(group_no="0", 
+                        items=all_stock_codes, 
+                        data_types=["00","0B","04"], 
+                        refresh=True)   
+                     
 
         except Exception as e:
             logger.error(f"❌ short_trading_handler 메서드 전체 오류: {str(e)}")
@@ -995,14 +1029,14 @@ class ProcessorModule:
             try:
                 await self.check_and_cancel_old_orders()
                 # 10초마다 체크
-                await asyncio.sleep(10)
+                await asyncio.sleep(30)
                 
             except asyncio.CancelledError:
                 logging.info("자동 취소 체크 태스크가 취소되었습니다.")
                 break
             except Exception as e:
                 logging.error(f"자동 취소 체크 중 오류: {str(e)}")
-                await asyncio.sleep(10)
+                await asyncio.sleep(30)
 
     async def check_and_cancel_old_orders(self):
         """10분 이상 미체결 주문 찾아서 취소 - socket_module Redis 데이터 사용"""

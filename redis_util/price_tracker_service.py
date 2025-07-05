@@ -15,6 +15,7 @@ class PriceTrackingData:
     """가격 추적 데이터 클래스"""
     stock_code    : str     # 주식코드
     isfirst       : bool    # 처음 실행여부
+    isafternoon   : bool    # 오후 처음 실행여부
     current_price : int     # 현재가 (성능 최적화를 위해 추가)
     highest_price : int     # 최고가
     lowest_price  : int     # 최저가
@@ -77,69 +78,36 @@ class PriceTracker:
             "trade_type": hash_data.get("trade_type", "HOLD")
         }
     
-    async def _should_update_price(self, stock_code: str, new_price: int) -> bool:
-        """가격 업데이트가 필요한지 확인 (성능 최적화)"""
-        try:
-            redis_key = self._get_redis_key(stock_code)
-            
-            # 현재 저장된 가격과 마지막 업데이트 시간 조회
-            pipe = self.redis_db.pipeline()
-            pipe.hget(redis_key, "current_price")
-            pipe.hget(redis_key, "last_updated")
-            results = await pipe.execute()
-            
-            current_stored_price = results[0]
-            last_updated = results[1]
-            
-            # 저장된 가격이 없으면 업데이트 필요
-            if current_stored_price is None:
-                return True
-            
-            stored_price = int(current_stored_price)
-            
-            # 가격이 동일하고 최근에 업데이트되었으면 스킵
-            if stored_price == new_price and last_updated:
-                time_diff = time.time() - float(last_updated)
-                if time_diff < self.UPDATE_THRESHOLD:
-                    return False
-            
-            # 가격이 다르거나 충분한 시간이 지났으면 업데이트
-            return stored_price != new_price
-            
-        except Exception as e:
-            logger.debug(f"가격 업데이트 필요성 확인 실패: {e}")
-            return True  # 에러시 안전하게 업데이트
-    
     async def initialize_tracking(self, 
-                                  stock_code: str, 
-                                  current_price: Optional[int] = 0,     
-                                  trade_price: Optional[int] = 0, 
-                                  period_type: Optional[bool] = False, 
-                                  isfirst: Optional[bool] = False,
-                                  qty_to_sell: Optional[int] = 0,
-                                  qty_to_buy: Optional[int] = 0,
-                                  trade_type: Optional[str] = "HOLD") -> bool:
+                                  stock_code    : str, 
+                                  current_price : Optional[int] = 0,     
+                                  trade_price   : Optional[int] = 0, 
+                                  period_type   : Optional[bool] = False, 
+                                  isfirst       : Optional[bool] = False,
+                                  isafternoon   : Optional[bool] = True,
+                                  qty_to_sell   : Optional[int] = 0,
+                                  qty_to_buy    : Optional[int] = 0,
+                                  trade_type    : Optional[str] = "HOLD") -> bool:
         """새로운 가격 추적 시작"""
+        update_price = trade_price if trade_price != 0 else current_price
+        
         try:
             current_timestamp = time.time()
             
-            # current_price가 0이면 trade_price로 설정
-            if current_price == 0:
-                current_price = trade_price
-            
             tracking_data = PriceTrackingData(
-                stock_code=stock_code,
-                isfirst=isfirst,
-                current_price=current_price,
-                highest_price=trade_price,
-                lowest_price=trade_price,
-                trade_price=trade_price,
-                period_type=period_type,
-                trade_time=current_timestamp,
-                last_updated=current_timestamp,
-                qty_to_sell=qty_to_sell,
-                qty_to_buy=qty_to_buy,
-                trade_type=trade_type
+                stock_code    = stock_code,
+                isfirst       = isfirst,
+                isafternoon   = isafternoon,
+                current_price = current_price,
+                highest_price = update_price,
+                lowest_price  = update_price,
+                trade_price   = trade_price,
+                period_type   = period_type,
+                trade_time    = current_timestamp,
+                last_updated  = current_timestamp,
+                qty_to_sell   = qty_to_sell,
+                qty_to_buy    = qty_to_buy,
+                trade_type    = trade_type
             )
             
             redis_key = self._get_redis_key(stock_code)
@@ -149,7 +117,7 @@ class PriceTracker:
             await self.redis_db.hset(redis_key, mapping=hash_data)
             await self.redis_db.expire(redis_key, self.EXPIRE_TIME)
             
-            logger.info(f"🎯 가격 추적 초기화 - 종목: {stock_code}, 체결가: {trade_price}")
+            # logger.info(f"🎯 가격 추적 초기화 - 종목: {stock_code}, 체결가: {current_price}")
             return True
             
         except Exception as e:
@@ -159,36 +127,37 @@ class PriceTracker:
     async def update_tracking_data(self, 
                                   stock_code: str,
                                   current_price: Optional[int] = None,
-                                  # highest_price: Optional[int] = None,
-                                  # lowest_price: Optional[int] = None,
                                   trade_price: Optional[int] = None,
                                   qty_to_sell: Optional[int] = None,
                                   qty_to_buy: Optional[int] = None,
                                   period_type: Optional[bool] = None,
                                   trade_type: Optional[str] = None,
                                   isfirst: Optional[bool] = None,
+                                  isafternoon: Optional[bool] = None,
                                   reset_extremes: bool = False,
                                   force_update: bool = False) -> Optional[Dict]:
  
         try:
             redis_key = self._get_redis_key(stock_code)
-            td = await self.get_tracking_data(stock_code)
-            update_data = td.get("trade_price",0)
+
+            
             # 기존 데이터 존재 확인
             if not await self.redis_db.exists(redis_key):
                 logger.debug(f"종목 {stock_code}의 가격 추적 데이터가 없습니다.")
                 return None
             
-            # 현재가 업데이트가 필요한지 확인 (성능 최적화)
-            if current_price is not None and not force_update:
-                if not await self._should_update_price(stock_code, current_price):
-                    logger.debug(f"가격 업데이트 스킵 - 종목: {stock_code}, 가격: {current_price}")
-                    return await self.get_tracking_data(stock_code)
             
             update_fields = {}
             updated = False
             current_time = time.time()
             
+            # 강제로 최고가 최저가 업데이트
+            if current_price is not None and  force_update:
+                update_fields["highest_price"] = str(current_price)
+                update_fields["lowest_price"] = str(current_price)
+                updated = True
+                logger.info(f"🔄 최고가/최저가 초기화 - 종목: {stock_code}, 가격: {trade_price}")
+                
             # 거래가 업데이트 (새로운 거래 발생)
             if trade_price is not None:
                 update_fields["trade_price"] = str(trade_price)
@@ -222,24 +191,11 @@ class PriceTracker:
                     # 최고가 갱신
                     if current_price > highest_price:
                         update_fields["highest_price"] = str(current_price)
-                        logger.info(f"📈 최고가 갱신 - 종목: {stock_code}, "
-                                   f"{highest_price} → {current_price}"
-                                   f"거래가 → {update_data}"
-                                   )
+
                     # 최저가 갱신
                     if current_price < lowest_price:
                         update_fields["lowest_price"] = str(current_price)
-                        logger.info(f"📉 최저가 갱신 - 종목: {stock_code}, "
-                                   f"{lowest_price} → {current_price}"
-                                    f"거래가 → {update_data}")
-                        
-            # if highest_price is not None:
-            #     update_fields["highest_price"] = str(highest_price)
-            #     updated = True
-                
-            # if lowest_price is not None:
-            #     update_fields["lowest_price"] = str(lowest_price)
-            #     updated = True
+
               
             # 나머지 필드들 업데이트
             if qty_to_sell is not None:
@@ -261,8 +217,11 @@ class PriceTracker:
             if isfirst is not None:
                 update_fields["isfirst"] = str(isfirst)
                 updated = True
-            
-            # 일괄 업데이트 (성능 최적화)
+                
+            if isafternoon is not None:
+                update_fields["isafternoon"] = str(isafternoon)
+                updated = True            
+                
             if updated:
                 update_fields["last_updated"] = str(current_time)
                 await self.redis_db.hset(redis_key, mapping=update_fields)
@@ -316,7 +275,6 @@ class PriceTracker:
             logger.error(f"❌ 빠른 가격 정보 조회 실패 - 종목: {stock_code}, 오류: {str(e)}")
             return None
     
-    # 기존 메서드들 유지 (get_tracking_data, remove_tracking 등)
     async def get_tracking_data(self, stock_code: str) -> Optional[Dict]:
         """전체 추적 데이터 조회"""
         try:
@@ -362,7 +320,66 @@ class PriceTracker:
             logger.error(f"❌ 첫 실행 여부 확인 실패 - 종목: {stock_code}, 오류: {str(e)}")
             return None
 
+    async def isafternoon(self, stock_code: str) -> Optional[bool]:
+        """
+        첫 실행 여부 확인
+        
+        Args:
+            stock_code: 종목코드
+            
+        Returns:
+            bool: 첫 실행 여부 또는 None (데이터가 없는 경우)
+        """
+        try:
+            redis_key = self._get_redis_key(stock_code)
+            
+            # isfirst 필드만 조회 (성능 최적화)
+            isafternoon_str = await self.redis_db.hget(redis_key, "isafternoon")
+            
+            if isafternoon_str is None:
+                logger.debug(f"종목 {stock_code}의 추적 데이터가 존재하지 않습니다.")
+                return None
+            
+            # 문자열을 boolean으로 변환
+            isafternoon_value = isafternoon_str.lower() == "true"
+            
+            logger.debug(f"종목 {stock_code}의 첫 실행 여부: {isafternoon_value}")
+            return isafternoon_value
+            
+        except Exception as e:
+            logger.error(f"❌ 첫 실행 여부 확인 실패 - 종목: {stock_code}, 오류: {str(e)}")
+            return None
 
+    async def set_isafternoon(self, stock_code: str, isafternoon: bool ) -> Optional[bool]:
+        """
+        첫 실행 여부 설정
+        
+        Args:
+            stock_code: 종목코드
+            isfirst: 설정할 첫 실행 여부
+            
+        Returns:
+            bool: 설정 성공 여부
+        """
+        try:
+            redis_key = self._get_redis_key(stock_code)
+            
+            # 데이터 존재 확인
+            if not await self.redis_db.exists(redis_key):
+                logger.debug(f"종목 {stock_code}의 가격 추적 데이터가 없습니다.")
+                return False
+            
+            # isfirst 필드 업데이트
+            await self.redis_db.hset(redis_key, "isafternoon", str(isafternoon))
+            await self.redis_db.expire(redis_key, self.EXPIRE_TIME)
+            
+            logger.info(f"✅ 첫 실행 여부 설정 완료 - 종목: {stock_code}, isfirst: {isafternoon}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ 첫 실행 여부 설정 실패 - 종목: {stock_code}, 오류: {str(e)}")
+            return False
+          
     async def set_isfirst(self, stock_code: str, isfirst: bool) -> bool:
         """
         첫 실행 여부 설정

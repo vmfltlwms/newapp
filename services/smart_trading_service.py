@@ -22,14 +22,15 @@ class TradingConstants:
     MONITOR_START: datetime_time = datetime_time(9, 0)   # 09:00
     MONITOR_END: datetime_time = datetime_time(9, 5)     # 09:05
     GAP_TRADING_START: datetime_time = datetime_time(9, 5)   # 09:05
-    GAP_TRADING_END: datetime_time = datetime_time(10, 30)    # 09:30
-    MAIN_TRADING_START: datetime_time = datetime_time(10, 30) # 09:30
+    GAP_TRADING_END: datetime_time = datetime_time(9, 30)    # 09:30
+    MAIN_TRADING_START: datetime_time = datetime_time(9, 30) # 09:30
     MAIN_TRADING_END: datetime_time = datetime_time(13, 0)   # 13:00
     AFTERNOON_START: datetime_time = datetime_time(13, 0)    # 13:00
-    AFTERNOON_END: datetime_time = datetime_time(15, 0)      # 15:00
-    
+    AFTERNOON_END: datetime_time = datetime_time(14, 50)     # 14:40
+    CLOSING_START : datetime_time = datetime_time(14, 50)     # 14:50
+    CLOSING_END :   datetime_time = datetime_time(15, 30)     # 15:30
     # 갭상승 매수 조건 (09:05~09:30)
-    GAP_EXECUTION_STRENGTH_MIN: float = 150.0           # 체결강도 150 이상
+    GAP_EXECUTION_STRENGTH_MIN: float = 130.0           # 체결강도 130 이상
     GAP_AVG_TRADE_AMOUNT_MIN: int = 100_000_000         # 5분간 평균거래대금 1억원 이상
     GAP_OPEN_RISE_MIN: float = 1.0                      # 시가 대비 1% 이상 상승
     
@@ -65,19 +66,20 @@ class TimeZone:
     MONITOR = "MONITOR"                  # 09:00~09:05 모니터링
     GAP_TRADING = "GAP_TRADING"          # 09:05~09:30 갭상승 매수
     MAIN_TRADING = "MAIN_TRADING"        # 09:30~13:00 메인 거래
-    AFTERNOON = "AFTERNOON"              # 13:00~15:00 오후 거래
-    CLOSED = "CLOSED"                    # 장 마감
+    AFTERNOON = "AFTERNOON"              # 13:00~14:50 오후 거래
+    CLOSING = "CLOSING"                  # 14:50~15:30 거래 정리
+    CLOSED = "CLOSED"                    # 15:30 ~     장 마감
 
 
 class SmartTrading:
     """스마트 트레이딩 클래스 - 완전히 새로 작성된 버전"""
     
     @inject
-    def __init__(self, 
-                 kiwoom_module, 
-                 price_tracker,
-                 stock_data_analyzer,
-                 redis_db: RedisDB = Provide[Redis_Container.redis_db]):
+    def __init__( self, 
+                  kiwoom_module, 
+                  price_tracker,
+                  stock_data_analyzer,
+                  redis_db: RedisDB = Provide[Redis_Container.redis_db]):
         self.kiwoom_module = kiwoom_module
         self.price_tracker = price_tracker
         self.stock_data_analyzer = stock_data_analyzer
@@ -97,9 +99,11 @@ class SmartTrading:
         # datetime.datetime에서 time 부분만 추출하여 비교
         current_time_only = current_time.time()
         
-        if current_time_only >= self.constants.AFTERNOON_END:  # 15:00 이후
+        if current_time_only >= self.constants.CLOSING_END:  # 15:30 이후
             return TimeZone.CLOSED
-        elif current_time_only >= self.constants.AFTERNOON_START:  # 13:00~15:00
+        elif current_time_only >= self.constants.CLOSING_START : #14:50 이후
+            return TimeZone.CLOSING
+        elif current_time_only >= self.constants.AFTERNOON_START:  # 13:00~14:40
             return TimeZone.AFTERNOON
         elif current_time_only >= self.constants.MAIN_TRADING_START:  # 09:30~13:00
             return TimeZone.MAIN_TRADING
@@ -158,11 +162,13 @@ class SmartTrading:
         try:
 
             # 가장 최신 데이터에서 누적거래대금 조회
+            if not data_list:
+                return 0
             latest_data = data_list[-1]
             logger.info(f"latest_data \n {latest_data}")
-            acc_volume = latest_data.get("acc_volume", 0)        # 파싱된 데이터의 acc_volume 사용
-            current_price = latest_data.get("current_price", 0)  # 파싱된 데이터의 current_price 사용
-            acc_amount = acc_volume * current_price              # acc_amount의 단위를 몰라서
+            acc_volume = int(latest_data.get("acc_volume", 0))        # 파싱된 데이터의 acc_volume 사용
+            current_price = int(latest_data.get("current_price", 0))  # 파싱된 데이터의 current_price 사용
+            acc_amount = acc_volume * abs(current_price)              # acc_amount의 단위를 몰라서
             
             if acc_amount <= 0:
                 logger.debug(f"[{stock_code}] 누적거래대금 없음: {acc_amount}")
@@ -219,7 +225,7 @@ class SmartTrading:
             
             # 1. 체결강도 확인
             execution_strength = latest_raw_data.get('execution_strength', 0)
-            if execution_strength < self.constants.GAP_EXECUTION_STRENGTH_MIN :  # 150 이상
+            if execution_strength < self.constants.GAP_EXECUTION_STRENGTH_MIN :  # 130 이상
                 logger.info(f"[{stock_code}] 체결강도 부족: {execution_strength} < {self.constants.GAP_EXECUTION_STRENGTH_MIN}")
                 return False
             
@@ -295,7 +301,7 @@ class SmartTrading:
             if not analysis_data:
                 logger.warning(f"[{stock_code}] 분석 데이터 없음")
                 return 0
-                        
+            strength_day    = analysis_data.get('day_strength', 0)            
             strength_1min   = analysis_data.get('1min_strength', 0)
             strength_5min   = analysis_data.get('5min_strength', 0)
             strength_10min  = analysis_data.get('10min_strength', 0)
@@ -304,37 +310,32 @@ class SmartTrading:
             avg_10min       = analysis_data.get('10min_avg', 0)
             
             # None 값 처리
-            strength_1min = strength_1min if strength_1min is not None else 100
-            strength_5min = strength_5min if strength_5min is not None else 100
-            strength_10min = strength_10min if strength_10min is not None else 100
-            avg_1min = avg_1min if avg_1min is not None else 0
-            avg_5min = avg_5min if avg_5min is not None else 0
+            strength_day    = strength_day if strength_day is not None else 100
+            strength_1min   = strength_1min if strength_1min is not None else 100
+            strength_5min   = strength_5min if strength_5min is not None else 100
+            strength_10min  = strength_10min if strength_10min is not None else 100
+            avg_1min  = avg_1min if avg_1min is not None else 0
+            avg_5min  = avg_5min if avg_5min is not None else 0
             avg_10min = avg_10min if avg_10min is not None else 0
             
             # 데이터 품질 확인
-            data_quality = analysis_data.get('data_quality', {})
-            if (data_quality.get('1min') != 'completed' or 
-                data_quality.get('5min') != 'completed'):
-                logger.warning(f"[{stock_code}] 데이터 품질 부족: {data_quality}")
-                return 0
+            # data_quality = analysis_data.get('data_quality', {})
+            # if (data_quality.get('1min') != 'completed' or 
+            #     data_quality.get('5min') != 'completed'):
+            #     logger.warning(f"[{stock_code}] 데이터 품질 부족: {data_quality}")
+            #     return 0
 
             logger.debug(f"[{stock_code}] 신호: S1={strength_1min}, S5={strength_5min}, S10={strength_10min}, "
                         f"A1={avg_1min}, A5={avg_5min}, A10={avg_10min}")
 
             # 신호 강도 계산
-            if (strength_1min > strength_5min > strength_10min and 
-                avg_1min > avg_5min > avg_10min and 
-                strength_5min > 120):
-                return 3  # 강한 매수
+            if (strength_5min >= strength_10min and strength_10min > 110 and
+                avg_1min > avg_5min > avg_10min ):
+                return 2  #  매수
+
                 
-            elif (strength_1min > strength_5min and 
-                  avg_1min > avg_5min and 
-                  strength_1min > 120):
-                return 2  # 일반 매수
-                
-            elif (strength_1min < strength_5min < strength_10min and 
-                  avg_1min < avg_5min < avg_10min and 
-                  strength_5min < 80):
+            elif (strength_5min <= strength_10min and strength_10min < 90 and
+                  avg_1min < avg_5min < avg_10min ):
                 return -2  # 매도
             else:
                 return 0  # 중립
@@ -398,7 +399,7 @@ class SmartTrading:
     
     def check_afternoon_sell_conditions(self, stock_code: str, current_price: float, tracking_data: dict) -> tuple:
         """
-        오후 매도 조건 확인 (13:00~15:00)
+        오후 매도 조건 확인 (13:00~14:40)
         
         조건:
         1. 13시 이후 최고가 대비 1% 하락 (price_tracker의 highest_price 사용)
@@ -431,7 +432,8 @@ class SmartTrading:
         try:
             # 1. 현재 시간대 확인
             time_zone = self.get_current_time_zone()
-            logger.info(f"time zone  = >{time_zone}")
+            
+          
             # 2. 일일 거래 완료 여부 확인
             is_completed = await self.is_daily_trade_completed(stock_code)
             if is_completed:
@@ -449,6 +451,10 @@ class SmartTrading:
             current_price = tracking_data.get('current_price', 0)
             trade_price = tracking_data.get('trade_price', 0)
             highest_price = tracking_data.get('highest_price', 0)
+            if time_zone == TimeZone.CLOSING :
+                logger.info(f"정리매매 {stock_code} {qty_to_sell}")
+                if qty_to_sell > 0:
+                    return TradingSignal("SELL", qty_to_sell, "정리매매 시작", time_zone=time_zone)  
             
             if current_price <= 0:
                 return TradingSignal("NEUTRAL", 0, "현재가 정보 없음", time_zone=time_zone)
@@ -457,11 +463,7 @@ class SmartTrading:
             analysis_data = await self.stock_data_analyzer.get_trading_data(stock_code)
             if not analysis_data or "error" in analysis_data:
                 logger.info(f"{analysis_data} analysis_data 가 없다")
-                # return TradingSignal("NEUTRAL", 0, "데이터 없음", time_zone=time_zone)
-            
-            # 6. 현재가 확인
-            if current_price <= 0:
-                return TradingSignal("NEUTRAL", 0, "현재가 정보 없음", time_zone=time_zone)
+                return TradingSignal("NEUTRAL", 0, "데이터 없음", time_zone=time_zone)
             
             # 8. 시간대별 거래 로직
             if time_zone == TimeZone.CLOSED:
@@ -476,7 +478,7 @@ class SmartTrading:
                 logger.info(f"{stock_code} => {qty_to_buy}, {qty_to_sell}")
                 # 매도 조건 확인 (보유 중일 때)
                 if qty_to_sell > 0:  # current_price 는 전달 안해도 됨
-                    should_sell, reason = self.check_gap_sell_conditions(stock_code, current_price, tracking_data)
+                    should_sell, reason = await self.check_gap_sell_conditions(stock_code, current_price, tracking_data)
                     if should_sell:
                         return TradingSignal("SELL", qty_to_sell, f"갭상승 {reason}", time_zone=time_zone)
                 
@@ -500,18 +502,22 @@ class SmartTrading:
                     else:
                         # 홀딩존 벗어난 경우
                         change_rate = self.safe_percentage_change(current_price, trade_price)
-                        
+                        signal_strength = await self.check_main_trading_conditions(stock_code, analysis_data)
+                        sell_by_sig = False
+                        if signal_strength <= -2:
+                            sell_by_sig = True
+
                         if change_rate > self.constants.HOLDING_ZONE_THRESHOLD:
                             # 상승해서 홀딩존을 벗어난 경우: 수익실현 조건 확인
                             should_sell, reason = self.check_profit_zone_conditions(current_price, trade_price, highest_price)
-                            if should_sell:
+                            if should_sell or sell_by_sig:
                                 return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone)
                             # 수익실현 조건 미충족시 계속 보유
                             return TradingSignal("NEUTRAL", 0, f"수익구간 보유 중 ({change_rate:.2f}%)", time_zone=time_zone)
                         
                         elif change_rate < -self.constants.HOLDING_ZONE_THRESHOLD:
                             # 하락해서 홀딩존을 벗어난 경우: 손절 실행
-                            return TradingSignal("SELL", qty_to_sell, f"손절: 매수가 대비 {change_rate:.2f}% 하락", time_zone=time_zone, analysis_data=analysis_data)
+                            return TradingSignal("SELL", qty_to_sell, f"손절: 매수가 대비 {change_rate:.2f}% 하락", time_zone=time_zone)
                 
                 # 매수 조건 확인
                 if qty_to_buy > 0:
@@ -524,15 +530,21 @@ class SmartTrading:
 
             
             elif time_zone == TimeZone.AFTERNOON:
-                # 13:00~15:00 오후 거래 (매도만)
-                
-                if qty_to_sell > 0:
+                # 13:00~14:50 오후 거래 (매도만)
+                isafternoon = await self.price_tracker.isafternoon(stock_code)
+                if isafternoon:
+                    await self.price_tracker.update_tracking_data(stock_code = stock_code,
+                                                                  current_price = current_price,
+                                                                  isafternoon = False,
+                                                                  force_update = True)
+                if qty_to_sell > 0  :
                     should_sell, reason = self.check_afternoon_sell_conditions(stock_code, current_price, tracking_data)
                     if should_sell:
                         return TradingSignal("SELL", qty_to_sell, reason, time_zone=time_zone)
                 
                 return TradingSignal("NEUTRAL", 0, "오후 매도 조건 미충족", time_zone=time_zone)
-            
+
+              
             return TradingSignal("NEUTRAL", 0, "알 수 없는 시간대", time_zone=time_zone)
             
         except Exception as e:
