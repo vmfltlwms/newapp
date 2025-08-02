@@ -18,9 +18,9 @@ class StockDataAnalyzer:
         self.EXPIRE_TIME = 60 * 30  # 30분
         # 최소 데이터 요구사항
         self.MIN_DATA = {
-            "1min": 3,
-            "5min": 5, 
-            "10min": 10
+            "1min": 1,
+            "5min": 3, 
+            "10min": 5
         }
         # KST 시간대 설정
         self.kst = pytz.timezone('Asia/Seoul')
@@ -68,8 +68,8 @@ class StockDataAnalyzer:
         
         parsed_data = {
             'stock_code': stock_code,
-            'timestamp': time.time(),
-            'execution_time': execution_time,
+            'timestamp': time.time(),                   # 현재시간 : UTC 시간 기준 timestamp
+            'execution_time': execution_time,           # 체결시간 : UTC 시간 기준 timestamp
             'current_price': int(values.get('10', '0')),
             'prev_day_diff': int(values.get('11', '0')),
             'change_rate': float(values.get('12', '0')),
@@ -96,18 +96,18 @@ class StockDataAnalyzer:
     async def get_recent_0b_data(self, stock_code: str, seconds: int = 300) -> List[dict]:
         """Redis에서 최근 N초간의 0B 데이터 조회"""
         redis_key = self._get_redis_key(stock_code, "0B")
-        now = time.time()
+        now = time.time()  # UTC time
         since = now - seconds
         
         try:
             raw_data = await self.redis_db.zrangebyscore(redis_key, min=since, max=now)
             
             # 🔥 Redis 조회 결과 상세 로깅
-            # logger.info(f"[{stock_code}] Redis 조회 - 키: {redis_key}")
-            # logger.info(f"[{stock_code}] 시간 범위: {since} ~ {now} ({seconds}초)")
-            # logger.info(f"[{stock_code}] 원시 데이터 개수: {len(raw_data) if raw_data else 0}")
+            logger.info(f"[{stock_code}] Redis 조회 - 키: {redis_key}")
+            logger.info(f"[{stock_code}] 시간 범위: {since} ~ {now} ({seconds}초)")
+            logger.info(f"[{stock_code}] 원시 데이터 개수: {len(raw_data) if raw_data else 0}")
             
-            if not raw_data:
+            if not raw_data:   # 데이터가 없을경우 처리방법
                 logger.warning(f"종목 {stock_code}의 최근 {seconds}초 데이터가 없습니다.")
                 return []
             
@@ -125,7 +125,7 @@ class StockDataAnalyzer:
                         if i == 0 or i == len(raw_data) - 1:
                             execution_time = parsed_data.get('execution_time', 0)
                             dt = datetime.fromtimestamp(execution_time, tz=self.kst)
-                            # logger.info(f"[{stock_code}] 샘플 데이터 #{i}: 시간={dt.strftime('%H:%M:%S')}, 가격={parsed_data.get('current_price')}")
+                            logger.info(f"[{stock_code}] 샘플 데이터 #{i}: 시간={dt.strftime('%H:%M:%S')}, 가격={parsed_data.get('current_price')}")
                             
                 except json.JSONDecodeError as e:
                     parsing_errors += 1
@@ -163,9 +163,9 @@ class StockDataAnalyzer:
             required_columns = ['current_price', 'volume', 'acc_volume', 
                               'open_price', 'execution_strength', 'buy_ratio']
             
-            # execution_time을 KST datetime으로 변환하고 인덱스로 설정
+            # execution_time을 KST datetime으로 변환하고 인덱스로 설정 /# .dt.tz_localize(None) 추가
             df['execution_time'] = pd.to_datetime(df['execution_time'], unit='s', utc=True)
-            df['execution_time'] = df['execution_time'].dt.tz_convert('Asia/Seoul')
+            df['execution_time'] = df['execution_time'].dt.tz_convert('Asia/Seoul').dt.tz_localize(None)
             df.set_index('execution_time', inplace=True)
             df.sort_index(inplace=True)
             df = df[required_columns]
@@ -206,7 +206,8 @@ class StockDataAnalyzer:
         start = df.index[0].floor('1min')
         end = df.index[-1].floor('1min')
         
-        all_minutes = pd.date_range(start=start, end=end, freq='1min', tz='Asia/Seoul').to_list()
+        # all_minutes = pd.date_range(start=start, end=end, freq='1min', tz='Asia/Seoul').to_list()
+        all_minutes = pd.date_range(start=start, end=end, freq='1min', tz=None).to_list()
         completed_minutes = all_minutes[:-1] if len(all_minutes) > 1 else []
         
         logger.debug(f"완료된 분: {[m.strftime('%H:%M') for m in completed_minutes]}")
@@ -238,8 +239,8 @@ class StockDataAnalyzer:
         # 🔥 시간대 일치 - 둘 다 KST 기준
         minute_df = df[(df.index >= start_time) & (df.index < end_time)]
         
-        # logger.debug(f"1분 데이터 계산 - 시간: {minute_time.strftime('%H:%M')}, "
-        #             f"범위: {start_time} ~ {end_time}, 데이터 수: {len(minute_df)}")
+        logger.debug(f"1분 데이터 계산 - 시간: {minute_time.strftime('%H:%M')}, "
+                    f"범위: {start_time} ~ {end_time}, 데이터 수: {len(minute_df)}")
         
         if len(minute_df) < self.MIN_DATA["1min"]:
             return {"status": "insufficient_data", "count": len(minute_df)}
@@ -326,12 +327,12 @@ class StockDataAnalyzer:
             df = await self.get_price_dataframe(stock_code)
             
             # 🔥 DataFrame 상태 상세 로깅
-            # logger.info(f"[{stock_code}] DataFrame 상태: 행수={len(df)}, 컬럼={list(df.columns)}")
-            # if not df.empty:
-            #     logger.info(f"[{stock_code}] 시간 범위: {df.index.min()} ~ {df.index.max()}")
-            #     logger.info(f"[{stock_code}] 샘플 데이터:\n{df.head()}")
-            # else:
-            #     logger.warning(f"[{stock_code}] DataFrame이 비어있습니다!")
+            logger.info(f"[{stock_code}] DataFrame 상태: 행수={len(df)}, 컬럼={list(df.columns)}")
+            if not df.empty:
+                logger.info(f"[{stock_code}] 시간 범위: {df.index.min()} ~ {df.index.max()}")
+                logger.info(f"[{stock_code}] 샘플 데이터:\n{df.head()}")
+            else:
+                logger.warning(f"[{stock_code}] DataFrame이 비어있습니다!")
             
             if len(df) < 10:
                 logger.warning(f"[{stock_code}] 데이터 부족: {len(df)}개")
@@ -358,13 +359,14 @@ class StockDataAnalyzer:
                     continue
                 
                 # 🔥 각 계산 전에 DataFrame 상태 재확인
-                # logger.info(f"[{stock_code}] {time_key} 계산 시작 - DataFrame 행수: {len(df)}")
+                logger.info(f"[{stock_code}] {time_key} 계산 시작 - DataFrame 행수: {len(df)}")
                 
                 # 1분, 5분, 10분 데이터 계산
                 data_1min = self.calculate_1min_data(df, minute_time)
                 data_5min = self.calculate_5min_data(df, minute_time)
                 data_10min = self.calculate_10min_data(df, minute_time)
                 
+
                 # 결과 합치기
                 result = {
                     "stock_code": stock_code,
@@ -382,10 +384,19 @@ class StockDataAnalyzer:
                     self.EXPIRE_TIME,
                     json.dumps(result, ensure_ascii=False)
                 )
+                ms_redis_key = f"redis:MS:{stock_code}:{time_key}"
+                summary_data = {
+                    "stock_code": stock_code,
+                    "time_key": time_key,
+                    "avg_price_1min": data_1min.get("ohlc", {}).get("avg"),
+                    "avg_price_5min": data_5min.get("avg_price"),
+                    "avg_price_10min": data_10min.get("avg_price")
+                }
+                await self.redis_db.setex(ms_redis_key, 30 * 60, json.dumps(summary_data))
                 
-                # logger.info(f"✅ [{stock_code}] {time_key} 데이터 저장 완료")
-                # logger.debug(f"저장된 데이터: 1min={data_1min['status']}, "
-                #            f"5min={data_5min['status']}, 10min={data_10min['status']}")
+                logger.info(f"✅ [{stock_code}] {time_key} 데이터 저장 완료")
+                logger.debug(f"저장된 데이터: 1min={data_1min['status']}, "
+                           f"5min={data_5min['status']}, 10min={data_10min['status']}")
             
             return True
             
@@ -474,3 +485,25 @@ class StockDataAnalyzer:
                    f"소요시간: {elapsed_time:.2f}초")
         
         return success_count, total_count
+
+
+
+
+
+        """
+        최근 저장된 가격 조회 (최대 30분 전까지)
+        """
+        for i in range(1, 31):  # 1분 전부터 30분 전까지
+            past_minute = current_minute - timedelta(minutes=i)
+            time_key = past_minute.strftime('%H:%M')
+            redis_key = f"redis:MP:{stock_code}:{time_key}"
+            
+            try:
+                data = await redis_db.get(redis_key)
+                if data:
+                    saved_data = json.loads(data)
+                    return saved_data.get('avg_price')
+            except:
+                continue
+        
+        return None

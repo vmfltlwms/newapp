@@ -1,10 +1,8 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import time
 
 # 전역 시간대 설정
 KST = ZoneInfo("Asia/Seoul")
-
 
 
 def get_kst_now() -> datetime:
@@ -33,12 +31,6 @@ def time_string_to_kst(time_str: str) -> datetime:
         hour, minute, second = int(parts[0]), int(parts[1]), int(parts[2])
     else:
         return get_kst_now()
-    
+      
     today = get_kst_now().date()
     return datetime(today.year, today.month, today.day, hour, minute, second)
-  
-  
-kst_now = datetime.now(ZoneInfo("Asia/Shanghai"))
-score = kst_now.timestamp()
-
-print(f"{score}  =  { time.time()}")

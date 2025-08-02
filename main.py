@@ -1,29 +1,58 @@
 import asyncio
+import datetime
 import logging
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
+# ==============================
+# 1️⃣ SQLAlchemy 로깅 완전 억제
+# ==============================
+for name in [
+    "sqlalchemy",
+    "sqlalchemy.engine",
+    "sqlalchemy.engine.Engine",
+    "sqlalchemy.pool",
+    "sqlalchemy.dialects",
+    "sqlalchemy.orm",
+]:
+    logging.getLogger(name).setLevel(logging.ERROR)
+    logging.getLogger(name).propagate = False
 
-# 🔇 가장 먼저 SQLAlchemy 로깅 완전 비활성화
-logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
-logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.ERROR)
-logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
-logging.getLogger("sqlalchemy.dialects").setLevel(logging.ERROR)
-logging.getLogger("sqlalchemy.orm").setLevel(logging.ERROR)
+# ==============================
+# 2️⃣ 로그 파일 생성
+# ==============================
+log_path = f"logs/new_trading_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-# 로거 전파 방지
-for logger_name in ["sqlalchemy", "sqlalchemy.engine", "sqlalchemy.pool"]:
-    logger = logging.getLogger(logger_name)
-    logger.propagate = False
+# ==============================
+# 3️⃣ 루트 로거 설정 (기존 핸들러 제거)
+# ==============================
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
 
-# 기본 로깅 설정 (SQLAlchemy 제외)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logger = logging.getLogger()      # root logger 사용
+logger.setLevel(logging.INFO)     # INFO 이상 로그 기록
 
+# 📌 파일 핸들러
+file_handler = logging.FileHandler(log_path, encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# 📌 콘솔 핸들러
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
+
+# ==============================
+# 4️⃣ SQLAlchemy engine WARNING 수준만 허용
+# ==============================
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+# ==============================
+# 5️⃣ 프로젝트 모듈 Import
+# ==============================
 from container.token_container import Token_Container
 from container.kiwoom_container import Kiwoom_Container
 from container.realtime_container import RealTime_Container
@@ -34,17 +63,24 @@ from container.processor_container import Processor_Container
 from container.step_manager_container import Step_Manager_Container
 from container.realtime_group_container import RealtimeGroup_container
 from module.socket_broadcast_module import WebSocketBroadcast
+from utils.long_trading import LongTradingAnalyzer
 from api.routes import api_router
 from config import settings
 from utils.log_hander import configure_logging
 
+# ==============================
+# 6️⃣ 커스텀 로깅 적용 (configure_logging)
+# ==============================
+configure_logging()
 
-# 커스텀 로깅 설정 (SQLAlchemy 제외하고 적용)
-configure_logging() 
+# configure_logging()에서 핸들러를 추가했을 수 있으므로
+# SQLAlchemy 로그 억제 다시 한 번 확실히 적용
+for name in ["sqlalchemy", "sqlalchemy.engine"]:
+    logging.getLogger(name).setLevel(logging.ERROR)
 
-# 다시 한번 SQLAlchemy 로깅 억제 (configure_logging 이후)
-logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
-logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
+logger.info("🚀 FastAPI 프로젝트 로깅 초기화 완료")
+logger.info(f"📄 로그 파일 경로: {log_path}")
+
 
 
 token_container = Token_Container()
@@ -100,7 +136,8 @@ async def lifespan(app: FastAPI,):
     realtime_group_module = realtime_group_container.realtime_group_module()
     bridge_module = WebSocketBroadcast(redis_db)
     
-    # 나머지 모듈 초기화
+    LTA = LongTradingAnalyzer(kiwoom_module)
+    
     await socket_module.initialize()
     await socket_module.connect()
     await kiwoom_module.initialize()
@@ -122,7 +159,8 @@ async def lifespan(app: FastAPI,):
     # 조건검색 요청
     await realtime_module.get_condition_list()
     await processor_module.short_trading_handler()
-    
+
+
   
     yield # 실행 종료 구분
     

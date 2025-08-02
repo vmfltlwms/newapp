@@ -148,7 +148,7 @@ class SocketModule:
     
     async def save_price(self,type_code, stock_code, price_data):
         key = f"redis:{type_code}:{stock_code}"
-        score = time.time()
+        score = time.time()   # UTC time 
         member = json.dumps(price_data)
         await self.redis_db.zadd(key, {member: score})
         data_holding_time = score - 60 * 20  # 20분이 지난 데이터는 삭제

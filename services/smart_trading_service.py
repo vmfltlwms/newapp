@@ -33,6 +33,7 @@ class TradingConstants:
     GAP_EXECUTION_STRENGTH_MIN: float = 130.0           # 체결강도 130 이상
     GAP_AVG_TRADE_AMOUNT_MIN: int = 100_000_000         # 5분간 평균거래대금 1억원 이상
     GAP_OPEN_RISE_MIN: float = 1.0                      # 시가 대비 1% 이상 상승
+    GAP_OPEN_RISE_MAX: float = 6.0                      # 시가 대비 6% 이상 상승
     
     # 갭상승 매도 조건 (09:05~09:30)
     GAP_HIGH_DROP_THRESHOLD: float = 2.0                # 최고가 대비 2% 하락
@@ -85,6 +86,7 @@ class SmartTrading:
         self.stock_data_analyzer = stock_data_analyzer
         self.redis_db = redis_db
         self.constants = TradingConstants()
+        self.isafternoon = {}
     
     def safe_percentage_change(self, current: float, base: float) -> float:
         """안전한 퍼센트 변화율 계산"""
@@ -94,7 +96,7 @@ class SmartTrading:
     
     def get_current_time_zone(self) -> str:
         """현재 시간대 구분"""
-        current_time = datetime.now(ZoneInfo("Asia/Seoul"))
+        current_time = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
         
         # datetime.datetime에서 time 부분만 추출하여 비교
         current_time_only = current_time.time()
@@ -140,6 +142,7 @@ class SmartTrading:
             
             if is_completed:
                 logger.info(f"[{stock_code}] ✅ 일일 거래 완료 - 매수/매도 모두 완료")
+                
                 
             else:
                 logger.debug(f"[{stock_code}] ⏳ 거래 진행 중 - qty_to_sell: {qty_to_sell}, trade_type: {trade_type}")
@@ -251,6 +254,10 @@ class SmartTrading:
             
             if open_rise < self.constants.GAP_OPEN_RISE_MIN:
                 logger.info(f"[{stock_code}] 시가 상승률 부족: {open_rise:.2f}% < {self.constants.GAP_OPEN_RISE_MIN}%")
+                return False
+              
+            if open_rise > self.constants.GAP_OPEN_RISE_MAX:
+                logger.info(f"[{stock_code}] 시가 상승률 과다: {open_rise:.2f}% < {self.constants.GAP_OPEN_RISE_MAX}%")
                 return False
             
             logger.info(f"[{stock_code}] ✅ 갭상승 조건 충족: 체결강도={execution_strength:.1f}, "
@@ -451,10 +458,8 @@ class SmartTrading:
             current_price = tracking_data.get('current_price', 0)
             trade_price = tracking_data.get('trade_price', 0)
             highest_price = tracking_data.get('highest_price', 0)
-            if time_zone == TimeZone.CLOSING :
-                logger.info(f"정리매매 {stock_code} {qty_to_sell}")
-                if qty_to_sell > 0:
-                    return TradingSignal("SELL", qty_to_sell, "정리매매 시작", time_zone=time_zone)  
+            
+ 
             
             if current_price <= 0:
                 return TradingSignal("NEUTRAL", 0, "현재가 정보 없음", time_zone=time_zone)
@@ -468,7 +473,12 @@ class SmartTrading:
             # 8. 시간대별 거래 로직
             if time_zone == TimeZone.CLOSED:
                 return TradingSignal("NEUTRAL", 0, "장 시작 전, 종료 후", time_zone=time_zone)
-            
+              
+            if time_zone == TimeZone.CLOSING :
+                logger.info(f"정리매매 {stock_code} {qty_to_sell}")
+                if qty_to_sell > 0:
+                    return TradingSignal("SELL", qty_to_sell, "정리매매 시작", time_zone=time_zone) 
+                  
             elif time_zone == TimeZone.MONITOR:
                 # 09:00~09:05 모니터링만
                 return TradingSignal("NEUTRAL", 0, "모니터링 시간", time_zone=time_zone)
@@ -527,15 +537,14 @@ class SmartTrading:
                 
                 return TradingSignal("NEUTRAL", 0, "메인 거래 조건 미충족", time_zone=time_zone)
                 # 매수 조건 확인
-
             
             elif time_zone == TimeZone.AFTERNOON:
                 # 13:00~14:50 오후 거래 (매도만)
-                isafternoon = await self.price_tracker.isafternoon(stock_code)
-                if isafternoon:
+                # isafternoon = await self.price_tracker.isafternoon(stock_code)
+                if stock_code not in self.isafternoon:
+                    self.isafternoon[stock_code] = False
                     await self.price_tracker.update_tracking_data(stock_code = stock_code,
                                                                   current_price = current_price,
-                                                                  isafternoon = False,
                                                                   force_update = True)
                 if qty_to_sell > 0  :
                     should_sell, reason = self.check_afternoon_sell_conditions(stock_code, current_price, tracking_data)

@@ -1,7 +1,9 @@
 # module.processor_module.py - 수정된 버전
 import math
+import os
 from data.stock_code import KOSPI 
 from datetime import date, datetime, time as datetime_time
+from zoneinfo import ZoneInfo
 import json
 import time
 from typing import Dict, List, Union
@@ -28,8 +30,16 @@ from redis_util.stock_analysis import StockDataAnalyzer
 from models.isfirst import IsFirst
 from services.smart_trading_service import SmartTrading
 from redis_util.price_tracker_service import PriceTracker
+from utils.long_trading import LongTradingAnalyzer
 
 logger = logging.getLogger(__name__)
+# log_path = f"logs/new_trading_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+# os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+# file_handler = logging.FileHandler(log_path, encoding='utf-8')
+# file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+# logger.addHandler(file_handler)
+
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
@@ -52,24 +62,33 @@ class ProcessorModule:
         self.realtime_group_module = realtime_group_module
         self.running = False
         self.isfirst = True
+        self.first_track ={} 
         self.count = 0 
         self.cancel_check_task = None 
         self.condition_list ={'kospi':set(),'kosdaq':set()} #조건검색 리스트
         
         # 🆕 거래 태스크 관리
         self.trading_tasks = []  # 개별 종목 거래 태스크들
-        self.timezone = pytz.timezone('Asia/Seoul')
+        self.timezone = ZoneInfo("Asia/Seoul")
         self.ping_counter = 0
-
+        
+        self.kospi_index  = 0 
+        self.kosdaq_index = 0
+        self.kospi_group  = [] 
+        self.kosdaq_group = []   
+        self.big_drop     = []
         self.holding_stock =[]           # 현재 보유중인 주식
         self.account_info ={}            # 현재 보유중인 주식 / 처음 실행할 때 매도 수량 관리용
         self.stock_qty = {}              # 현재 주식별 보유 수량 관리
         self.deposit = 0                 # 예수금
         self.assigned_per_stock = 0      # 각 주식별 거래가능 금액
         self.account = []                # 내 주식 소유현황
+        self.trade_done = []
+        self.trade_group = []
         self.order_tracker ={}
         self.order_execution_tracker = {}  # 새로운 추적용
         
+        self.LTH = LongTradingAnalyzer(self.kiwoom_module)
         self.SA = StockDataAnalyzer(self.redis_db)
         self.PT = PriceTracker(self.redis_db)
         self.ST = SmartTrading( self.kiwoom_module, 
@@ -93,15 +112,28 @@ class ProcessorModule:
           '04': self.type_callback_04,
           '0B': self.type_callback_0B,
           '0D': self.type_callback_0D,
+          '0J': self.type_callback_0J,
         }
+        
+        self.type_0B_callback_table = {
+          'PL': self.kospi_long,
+          'PS': self.kospi_short,
+          'DL': self.kosdaq_long,
+          'DS': self.kosdaq_short,
+          'OT': self.other_stock,
+        }
+
         
     async def initialize(self) : # 현재 보유주식별 주식수, 예수금, 주문 취소 확인 및 실행
         
         try:
             # running을 True로 설정한 후 태스크 시작
             self.running = True
-            self.holding_stock = await self.extract_stock_codes() # 현재 보유중인 주식 
-            self.isfirst = await self.isfirst_start() # 오늘 첫번째 실행인지 확인  
+            self.holding_stock = await self.extract_stock_codes() # 현재 보유중인 주식
+            for stock_code in self.holding_stock : 
+                if stock_code in KOSPI : self.kospi_group.append(stock_code)
+                else : self.kosdaq_group.append(stock_code)
+                
             # 🔧 수정: stock_qty 딕셔너리 명시적 초기화
             if not hasattr(self, 'stock_qty') or self.stock_qty is None:
                 self.stock_qty = {}
@@ -176,55 +208,6 @@ class ProcessorModule:
         market_close = datetime_time(15, 30)
         return market_open <= current_time <= market_close
 
-    async def trader_executor(self, stock_code: str):
-        """개별 종목 거래 실행기 - 백그라운드에서 지속 실행"""
-        # logger.info(f"🚀 [{stock_code}] 거래 실행기 시작")
-        
-        try:
-            while self.running:
-                # 시장 시간 체크
-                if not self.is_market_time():
-                    await asyncio.sleep(60)  # 폐장시간엔 1분 대기
-                    continue
-                
-                try:
-                    # SmartTrading 거래 실행
-                    result = await self.ST.execute_trade_order(stock_code)
-                    if result:
-                        logger.info(f"✅ [{stock_code}] 거래 실행됨")
-                    else:
-                        logger.debug(f"⏸️ [{stock_code}] 거래 신호 없음 또는 대기")
-                
-                except Exception as e:
-                    logger.error(f"❌ [{stock_code}] 거래 오류: {e}")
-                
-                # 30초 대기
-                await asyncio.sleep(30)
-                
-        except asyncio.CancelledError:
-            logger.info(f"🛑 [{stock_code}] 거래 실행기 종료")
-            raise
-        except Exception as e:
-            logger.error(f"❌ [{stock_code}] 거래 실행기 예외: {e}")
-
-    async def run_analysis_scheduler(self, stock_codes: List[str]):
-        """전체 종목 통합 분석 - 30초마다"""
-        logger.info(f"📊 분석 스케줄러 시작 - {len(stock_codes)}개 종목")
-        
-        while self.running:
-            try:
-                if self.is_market_time():
-                    success_count, total_count = await self.SA.batch_process_stocks(stock_codes)
-                    logger.debug(f"✅ 분석 완료: {success_count}/{total_count}")
-                else:
-                    logger.debug("⏰ 장외 시간 - 분석 스킵")
-                
-                await asyncio.sleep(30)
-                
-            except Exception as e:
-                logger.error(f"❌ 분석 스케줄러 오류: {e}")
-                await asyncio.sleep(30)
-
     # 클린 deposit
     async def clean_deposit(self) -> int :
         await asyncio.sleep(0.3)
@@ -236,7 +219,7 @@ class ProcessorModule:
         return res 
     
     # 2. order_data_tracker 메서드 수정 (변수명 충돌 해결)
-    def track_order_execution(self, order_number, order_qty, trade_qty, untrade_qty):
+    def track_order_execution(self, stock_code, order_qty, trade_qty, untrade_qty):
         """주문 체결 추적 및 증분 체결량 계산"""
         try:
             # order_execution_tracker 딕셔너리 사용 (기존 order_tracker와 구분)
@@ -244,8 +227,8 @@ class ProcessorModule:
                 self.order_execution_tracker = {}
             
             # 이전 누적 체결량 조회
-            if order_number in self.order_execution_tracker:
-                prev_total_qty = int(self.order_execution_tracker[order_number].get("trade_qty", 0))
+            if stock_code in self.order_execution_tracker:
+                prev_total_qty = int(self.order_execution_tracker[stock_code].get("trade_qty", 0))
             else:
                 prev_total_qty = 0
 
@@ -253,7 +236,7 @@ class ProcessorModule:
             current_total_qty = int(trade_qty) if trade_qty else 0
             
             # 주문 정보 업데이트
-            self.order_execution_tracker[order_number] = {
+            self.order_execution_tracker[stock_code] = {
                 'order_qty': int(order_qty),
                 'trade_qty': current_total_qty,  # 누적 체결량
                 'untrade_qty': int(untrade_qty)
@@ -261,8 +244,8 @@ class ProcessorModule:
 
             # 전량 체결되었으면 삭제
             if current_total_qty >= int(order_qty) and int(untrade_qty) == 0:
-                logger.info(f"{order_number}에 대한 주문이 완료되었습니다")
-                del self.order_execution_tracker[order_number]
+                logger.info(f"{stock_code}에 대한 주문이 완료되었습니다")
+                del self.order_execution_tracker[stock_code]
 
             # 이번에 체결된 증분 수량 반환
             incremental_qty = max(current_total_qty - prev_total_qty, 0)
@@ -374,7 +357,7 @@ class ProcessorModule:
     async def trnm_callback_ping(self, response:dict):
         await self.socket_module.send_message(response)
         self.ping_counter +=1
-        if self.ping_counter // 5 == 1:
+        if self.ping_counter // 20 == 1:
             self.ping_counter = 0
             logging.info('ping pong')
         
@@ -392,7 +375,6 @@ class ProcessorModule:
         pass
 
     async def trnm_callback_cnsrreq(self, response:dict):
-        await self.stock_codes_grouping(response) # 반환되는 코드를 realtime group 에 추가
         logger.info("trnm_callback_cnsrreq 실행")
 
     async def trnm_callback_cnsrclr(self, response:dict):
@@ -426,9 +408,6 @@ class ProcessorModule:
                 request_name = item.get('name')
                 
                 # 🆕 00 타입만 집중적으로 디버깅
-                if request_type in ["00", "04"]:
-                    logging.info(f"🔍 DEBUG [{request_type} 타입]: 수신된 데이터 - 아이템: {request_item}, 이름: {request_name}")
-                
 
                 # 해당 타입의 핸들러 찾기
                 handler = self.type_callback_table.get(request_type)
@@ -453,7 +432,6 @@ class ProcessorModule:
     async def type_callback_00(self, data: dict): 
         try:
             # 🆕 함수 시작 로그 (00 타입만)
-            logging.info(f"🚀 [00타입] type_callback_00 함수 시작")
             
             values = data.get('values', {})   
             stock_code = data.get('item')
@@ -511,19 +489,26 @@ class ProcessorModule:
             order_status = str(order_data.get('905', '')).strip()
             order_state = str(order_data.get('913', '')).strip()
             
-            # 🆕 주요 변수 로그
-            logging.info(f"📊 [00타입] 파싱 결과 - 주문량: {order_qty}, 체결량: {trade_qty}, 미체결: {untrade_qty}, 체결가: {execution_price}")
-            
+           
             # 주문번호 유효성 검사
             if not order_number or order_number == '0':
                 logging.warning(f"[00타입] 유효하지 않은 주문번호: {order_number}")
                 return
                         
             # 증분 체결량 계산
-            incremental_trade_qty = self.track_order_execution(order_number, order_qty, trade_qty, untrade_qty)
-            
-            logger.info(f"📋 주문 {order_number} - 종목: {stock_code}, 주문량: {order_qty}, "
-                      f"증분체결량: {incremental_trade_qty}, 총체결량: {trade_qty}")
+            incremental_trade_qty = self.track_order_execution(stock_code, order_qty, trade_qty, untrade_qty)
+            # 🆕 주요 변수 로그
+            logging.info(
+                f"\n📊 [주문 체결 정보] ───────────────────────────────\n"
+                f"📌 종목코드     : {stock_code}\n"
+                f"🆔 주문번호     : {order_number}\n"
+                f"📦 주문량       : {order_qty:,}주\n"
+                f"🔄 증분체결량   : {incremental_trade_qty:,}주\n"
+                f"✅ 총체결량     : {trade_qty:,}주\n"
+                f"⏳ 미체결량     : {untrade_qty:,}주\n"
+                f"💰 체결가격     : {execution_price:,}원\n"
+                f"─────────────────────────────────────────────────"
+            )
             
             # 주문 상태 분류
             is_cancelled = '취소' in order_status or '취소' in order_state
@@ -543,12 +528,16 @@ class ProcessorModule:
                 status_text = "취소" if is_cancelled else "거부"
                 logging.info(f"🚫 주문 {status_text} 처리 - 종목: {stock_code}, "
                             f"주문번호: {order_number}, 상태: {order_status}")
-                logging.info(f"💰 예수금 변화: {prev_deposit:,} → {self.deposit:,}")
+                logging.info(f"💰 예수금 변화: {self.deposit:,} → {prev_deposit:,}")
+                
+                # 이 부분 로직 설명()
+                if stock_code in self.trade_done : self.trade_done.remove(str(stock_code))
+                else :  self.holding_stock.append(str(stock_code))
             
             # 2. 실제 체결된 경우만 수량 업데이트
             elif incremental_trade_qty > 0 and execution_price > 0:
                 # 추적 데이터 조회 (안전한 처리)
-                tracking_data = await self.PT.get_tracking_data(stock_code)
+                tracking_data = await self.PT.get_price_info(stock_code)
                 
                 if not tracking_data:
                     logging.warning(f"⚠️ 종목 {stock_code}의 추적 데이터가 없습니다. 체결 처리를 건너뜁니다.")
@@ -579,7 +568,12 @@ class ProcessorModule:
                           trade_type="BUY")
                     
                     # 체결 상태 로그
-                    completion_status = "완료" if (untrade_qty == 0 and trade_qty == order_qty) else "부분 체결"
+                    if (untrade_qty == 0 and trade_qty == order_qty) :
+                        completion_status = "완료"
+                        # if stock_code not in self.holding_stock :
+                        #     self.holding_stock.append(str(stock_code)) 
+ 
+                    else : completion_status = "부분 체결"
                     
                     logging.info(f"💰 매수 체결 {completion_status} - 주문번호: {order_number}, 종목: {stock_code}")
                     logging.info(f"   📈 체결가: {execution_price:,}원, 증분 체결량: {incremental_trade_qty}주")
@@ -601,7 +595,11 @@ class ProcessorModule:
                           trade_type="SELL")
                     
                     # 체결 상태 로그
-                    completion_status = "완료" if (untrade_qty == 0 and trade_qty == order_qty) else "부분 체결"
+                    if (untrade_qty == 0 and trade_qty == order_qty) :
+                        completion_status = "완료"
+                        if stock_code in self.holding_stock:
+                            self.holding_stock.remove(str(stock_code))
+                    else : completion_status = "부분 체결"
                     
                     logging.info(f"💰 매도 체결 {completion_status} - 주문번호: {order_number}, 종목: {stock_code}")
                     logging.info(f"   📉 체결가: {execution_price:,}원, 증분 체결량: {incremental_trade_qty}주")
@@ -637,11 +635,8 @@ class ProcessorModule:
             logging.error(f"상세 오류 정보: {traceback.format_exc()}")
                 
     async def type_callback_02(self, data: dict): 
-        logger.info(data)
+        logger.info("data")
                 
-    async def type_callback_02(self, data: dict): 
-        logger.info(data)
-        
     # 보유주식 수량 업데이트
     async def type_callback_04(self, data: dict):
         """현물잔고 데이터 처리 - 최신 데이터로 업데이트"""
@@ -667,7 +662,7 @@ class ProcessorModule:
                 # A 제거 (A105560 → 105560)
                 stock_code = stock_code[1:] if stock_code.startswith('A') else stock_code
                 
-                # 보유 수량 업데이트 (self.stock_qty)
+                # 보유 수량 업데이트 (self.stock_qty)  * tracker update
                 if quantity_int > 0:
                     self.stock_qty[stock_code] = quantity_int
                     logger.info(f"📊 잔고 업데이트 - 종목: {stock_code}, 수량: {quantity_int}주, "
@@ -691,49 +686,722 @@ class ProcessorModule:
             stock_code = data.get('item')
             stock_code = stock_code[1:] if stock_code and stock_code.startswith('A') else stock_code
 
+            if not stock_code:
+                logger.warning("0B 데이터에 종목코드가 없습니다.")
+                return
+              
+            current_price = abs(int(values.get('10', '0')))
+            open_price = abs(int(values.get('16', '0')))
+            high_price = abs(int(values.get('17', '0')))
+            low_price = abs(int(values.get('18', '0')))
+            execution_strength = float(values.get('228', '0'))
+            
+            if current_price <= open_price * 0.95 and current_price >= low_price * 1.005:
+                self.holding_stock.remove(str(stock_code))
+                self.trade_done.append(str(stock_code))
+                self.big_drop.append(str(stock_code))
+                buy_qty = int(self.assigned_per_stock / current_price * 1.2)
+                await self.kiwoom_module.order_stock_buy(
+                      dmst_stex_tp="KRX",
+                      stk_cd=stock_code,
+                      ord_qty=str(buy_qty),
+                      ord_uv="",  # 시장가
+                      trde_tp="3",  # 시장가 주문
+                      cond_uv="")
+                
+            if stock_code in  self.big_drop :
+                tracking_data = await self.PT.get_price_info(stock_code)
+                qty_to_sell = tracking_data.get('qty_to_sell', 0)
+                trade_price = tracking_data.get('trade_price', 0)
+                if current_price > trade_price * 1.03 and high_price > current_price * 1.005 :  
+                    self.big_drop.remove(str(stock_code))
+                    await self.kiwoom_module.order_stock_sell(
+                        dmst_stex_tp="KRX",
+                        stk_cd=stock_code,
+                        ord_qty=str(qty_to_sell),
+                        ord_uv="",  # 시장가
+                        trde_tp="3",  # 시장가 주문
+                        cond_uv="")                  
+            # 🆕 0B 데이터 처리 시작 로그
+            # logger.debug(f"🔄 [0B 처리 시작] {stock_code} - 현재가: {current_price:,}, 고가: {high_price:,}, 저가: {low_price:,}, 체결강도: {execution_strength}")
+            
+            # 만약 현재 보유중인 주식일 경우 (매도 주문)
+            if stock_code in self.holding_stock:
+                # logger.info(f"📈 [보유종목 처리] {stock_code} - 현재가: {current_price:,}, 체결강도: {execution_strength}")
+                
+                # 고점 대비 현재가 비율 
+                if execution_strength >= 120:
+                    high_turn_around_threshold = 1.01
+                elif execution_strength <= 80:
+                    high_turn_around_threshold = 1.00
+                else:
+                    high_turn_around_threshold = 1.005
+              
+                tracking_data = await self.PT.get_price_info(stock_code)
+                
+                if not tracking_data:
+                    logger.warning(f"⚠️ [추적데이터 없음] 종목 {stock_code}의 추적 데이터가 없습니다 - 매도 로직 스킵")
+                    return None
+                
+                # 보유 수량 및 평균 매수가 추출
+                qty_to_sell = tracking_data.get('qty_to_sell', 0)
+                trade_price = tracking_data.get('trade_price', 0)
+                
+                # 정상적인 매도 상황
+                profit_rate = ((current_price - trade_price) / trade_price * 100) if trade_price > 0 else 0
+ 
+                # 🆕 익절 조건 상세 체크
+                profit_condition = current_price > trade_price * 1.02
+                high_threshold_condition = high_price >= current_price * high_turn_around_threshold
+
+                if profit_condition and high_threshold_condition:
+                    logger.info(f"🚨 [익절 매도 시작] {stock_code} - 수익률: {profit_rate:+.2f}% | 매도량: {qty_to_sell}주")
+                    logger.info(f"   ├─ 현재가: {current_price:,}원 > 익절가: {trade_price * 1.02:,.0f}원")
+                    logger.info(f"   └─ 고가: {high_price:,}원 >= 임계값: {current_price * high_turn_around_threshold:,.0f}원")
+                    
+                    if stock_code in self.holding_stock:
+                        self.holding_stock.remove(str(stock_code))
+                        logger.info(f"🗑️ [보유목록 제거] {stock_code}")
+                    
+                    try:
+                        await self.kiwoom_module.order_stock_sell(
+                            dmst_stex_tp="KRX",
+                            stk_cd=stock_code,
+                            ord_qty=str(qty_to_sell),
+                            ord_uv="",  # 시장가
+                            trde_tp="3",  # 시장가 주문
+                            cond_uv=""
+                        )
+                        logger.info(f"✅ [익절 주문 완료] {stock_code} - {qty_to_sell}주 시장가 매도 주문")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ [익절 주문 실패] {stock_code} - 오류: {str(e)}")
+                    
+                    return  # 익절 주문 후 다른 조건 체크 안함
+                    
+                # 🆕 손절 조건 상세 체크
+                loss_condition_1 = current_price <= trade_price * 0.95 and execution_strength <= 80
+                loss_condition_2 = current_price <= trade_price * 0.9
+                
+
+                if loss_condition_1 or loss_condition_2:
+                    loss_percent = ((current_price - trade_price) / trade_price * 100) if trade_price > 0 else 0
+                    condition_text = "5%손실+체결강도약화" if loss_condition_1 else "10%손실"
+                    
+                    logger.warning(f"🚨 [손절 매도 시작] {stock_code} - 손실률: {loss_percent:+.2f}% | 조건: {condition_text}")
+                    logger.warning(f"   ├─ 현재가: {current_price:,}원 vs 매수가: {trade_price:,}원")
+                    logger.warning(f"   └─ 매도량: {qty_to_sell}주")
+                    
+                    if stock_code in self.holding_stock:
+                        self.holding_stock.remove(str(stock_code))
+                        logger.info(f"🗑️ [보유목록 제거] {stock_code}")
+                    
+                    try:
+                        await self.kiwoom_module.order_stock_sell(
+                            dmst_stex_tp="KRX",
+                            stk_cd=stock_code,
+                            ord_qty=str(qty_to_sell),
+                            ord_uv="",  # 시장가
+                            trde_tp="3",  # 시장가 주문
+                            cond_uv=""
+                        )
+                        logger.warning(f"✅ [손절 주문 완료] {stock_code} - {qty_to_sell}주 시장가 매도 주문")
+                    except Exception as e:
+                        logger.error(f"❌ [손절 주문 실패] {stock_code} - 오류: {str(e)}")
+                    
+                    return  # 손절 주문 후 다른 조건 체크 안함
+                
+
+            # 현재 보유하지 않은 주식(매수 주문)
+            else:
+                
+                # 고점 대비 현재가 비율 
+                if execution_strength <= 80:
+                    low_turn_around_threshold = 1.01
+                elif execution_strength <= 100:
+                    low_turn_around_threshold = 1.005
+                else:
+                    low_turn_around_threshold = 1.00
+                
+                tracking_data = await self.PT.get_price_info(stock_code)
+                
+                if not tracking_data:
+                    logger.warning(f"⚠️ [추적데이터 없음] 종목 {stock_code}의 추적 데이터가 없습니다 - 매수 로직 스킵")
+                    return None
+                  
+                ma20 = tracking_data.get('ma20', 0)
+                ma20_slope = tracking_data.get('ma20_slope', 0)
+                ma20_avg_slope = tracking_data.get('ma20_avg_slope', 0)
+                ord_qty = int(self.assigned_per_stock / current_price * 1.2)
+
+                # 매수 조건 체크 
+                slope_condition = ma20_slope >= 0.1 and ma20_avg_slope >= 0.1
+                price_condition = ma20 >= current_price
+                not_traded_condition = stock_code not in self.trade_done
+
+                if slope_condition and price_condition and not_traded_condition:
+                    logger.warning(f"🚨 [매수 주문 시작] {stock_code} - 현재가: {current_price:,}원 | 주문량: {ord_qty}주")
+                    logger.warning(f"   ├─ MA20: {ma20:,}원 (지지선 역할)")
+                    logger.warning(f"   └─ 기울기: {ma20_slope} (평균: {ma20_avg_slope})")
+                    
+                    self.trade_done.append(stock_code)
+                    logger.info(f"📝 [거래완료 목록 추가] {stock_code}")
+                    
+                    try:
+                        await self.kiwoom_module.order_stock_buy(
+                            dmst_stex_tp="KRX",
+                            stk_cd=stock_code,
+                            ord_qty=str(ord_qty),
+                            ord_uv="",  # 시장가
+                            trde_tp="3",  # 시장가 주문
+                            cond_uv=""
+                        )
+                        logger.warning(f"✅ [매수 주문 완료] {stock_code} - {ord_qty}주 시장가 매수 주문")
+                    except Exception as e:
+                        logger.error(f"❌ [매수 주문 실패] {stock_code} - 오류: {str(e)}")
+                        # 실패 시 trade_done에서 제거
+                        if stock_code in self.trade_done:
+                            self.trade_done.remove(stock_code)
+                            logger.info(f"🔄 [거래완료 목록 제거] {stock_code} (주문 실패로 인한 롤백)")
+
+                        
+        except Exception as e:
+            logger.error(f"❌ [0B 데이터 처리 오류] {stock_code if 'stock_code' in locals() else 'UNKNOWN'} - 오류: {str(e)}")
+            import traceback
+            logger.error(f"상세 스택 트레이스: {traceback.format_exc()}")
+
+    async def type_callback_0D(self, data: dict): pass
+    
+    async def type_callback_0J(self, data: dict) :
+        try:
+            for item_data in data.get('data', []):
+                values = item_data.get('values', {})
+                item_code = item_data.get('item', '')
+                
+                # 등락률 데이터 (12번 필드)
+                change_rate = values.get('12', '0')
+                
+                # KOSPI 지수 (001)
+                if item_code == '001':
+                    self.kospi_index = change_rate
+                    self.logger.debug(f"KOSPI 지수 업데이트: 등락률 {change_rate}%")
+                
+                # KOSDAQ 지수 (101)
+                elif item_code == '101':
+                    self.kosdaq_index = change_rate
+                    self.logger.debug(f"KOSDAQ 지수 업데이트: 등락률 {change_rate}%")
+                    
+        except Exception as e:
+            self.logger.error(f"업종지수 실시간 데이터 처리 중 오류: {str(e)}")
+            self.logger.error(f"수신 데이터: {data}")
+
+    async def short_trading_handler(self) :
+        await self.realtime_module.get_condition_list()
+        kospi = await self.realtime_module.request_condition_search(seq="0")
+        kosdaq = await self.realtime_module.request_condition_search(seq="1")
+        self.kospi_group  = list(set(self.cond_to_list(kospi))  | set(self.kospi_group))
+        self.kosdaq_group = list(set(self.cond_to_list(kosdaq)) | set(self.kosdaq_group))
+        
+        # 계좌 정보(계좌번호)
+        account_info = await self.kiwoom_module.get_account_info()
+        
+        # 주식코드, 보유수량, 평균 매매가격 추출(stock_code, stock_qty, avg_price)
+        self.account_info = self.extract_holding_stocks_info(account_info)
+        
+        condition_stock_group = self.kospi_group + self.kosdaq_group
+
+        for stock_code in condition_stock_group : 
+            await self.PT.initialize_tracking(stock_code = stock_code,
+                                              current_price = 0,     
+                                              trade_price = 0, 
+                                              period_type= False, 
+                                              isfirst = False,
+                                              price_to_buy = 0,
+                                              price_to_sell = 0,
+                                              qty_to_sell = 0,
+                                              qty_to_buy = 0,
+                                              ma20_slope = 0,
+                                              ma20_avg_slope = 0,
+                                              ma20 = 0,
+                                              trade_type="HOLD") 
+            
+            base_df = await self.LTH.daily_chart_to_df(stock_code)
+            df = self.LTH.process_daychart_df(base_df).head(20)
+            avg_slope = self.LTH.average_slope(df)
+            
+            # 매수 가능한 주식만 선별해서 trade_group에 추가
+            if  avg_slope['avg_ma20_slope'] >= 0.1 and df.iloc[0]["ma20_slope"] >= 0.1 :
+                self.trade_group.append(stock_code)
+                
+        # 보유 주식과 거래가능 주식만 뽑아서 거래목록에 추가
+        all_stock_codes = list(set(self.trade_group) | set(self.holding_stock))    
+        self.assigned_per_stock = min(int(self.deposit / len(all_stock_codes)),10000000) 
+
+        logger.info(f"💰 거래가능 종목 : {len(all_stock_codes)}, 종목당 할당 금액: {self.assigned_per_stock:,}원")
+        
+        for stock_code in self.holding_stock :
+            try:
+                # 각 주식 정보 추출
+                stock_info = self.account_info.get(stock_code, {}) 
+                qty = int(stock_info.get('qty', 0))  # 보유 수량
+                avg_price = int(stock_info.get('avg_price', 0))    # 평균 매수가
+                await self.PT.update_tracking_data( stock_code = stock_code,
+                                                    trade_price = avg_price,
+                                                    qty_to_sell = qty,
+                                                    trade_type="BUY")
+            except Exception as e:
+                logger.error(f"❌ {stock_code} 처리 중 오류: {str(e)}")
+                continue
+              
+        # 실시간 종목 등록 
+        await self.realtime_module.subscribe_realtime_price(group_no="0", 
+                    items      = all_stock_codes, 
+                    data_types = ["00","0B","04"], 
+                    refresh    = True )   
+        
+        # 실시간 코스피, 코스닥 지수 등록
+        await self.realtime_module.subscribe_realtime_price(group_no="1", 
+                    items=['001','101'], 
+                    data_types=["0J"], 
+                    refresh=True)   
+        
+        while True :
+            for code in all_stock_codes:
+                base_df = await self.LTH.minute_chart_to_df(code)
+                df = self.LTH.process_minchart_df(base_df).head(20)
+                ma20 = df.iloc[0]['ma20']
+                close = df.iloc[0]['close']
+                ma20_slope = float(df.iloc[0]['ma20_slope'])
+                time_display = df.iloc[0]['time_display']
+                avg_ma20_slope = self.LTH.average_slope(df)['avg_ma20_slope']
+                logger.info(f"{code} - 처리시간 : {time_display}"
+                            f"현재가:{close}, ma20 : {ma20}, 기울기 : {ma20_slope}, 평균기울기 : {avg_ma20_slope}")
+                
+                await self.PT.update_tracking_data( stock_code     = code,
+                                                    ma20_slope     = ma20_slope,
+                                                    ma20_avg_slope = avg_ma20_slope,
+                                                    ma20           = ma20)
+            
+            
+    def safe_int_convert(self, value, default=0):
+        """문자열을 안전하게 정수로 변환"""
+        try:
+            if value is None:
+                return default
+            
+            if isinstance(value, (int, float)):
+                return int(value)
+            
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if not cleaned or cleaned == '':
+                    return default
+                
+                # 숫자가 아닌 문자가 포함된 경우 체크
+                if not all(c.isdigit() or c in '.-+' for c in cleaned.replace(',', '')):
+                    logging.warning(f"숫자가 아닌 문자 포함: '{value}'")
+                    return default
+                
+                try:
+                    # 콤마 제거 후 float으로 먼저 변환 후 int로 변환
+                    return int(float(cleaned.replace(',', '')))
+                except ValueError:
+                    logging.warning(f"숫자 변환 불가: '{value}'")
+                    return default
+            
+            else:
+                logging.warning(f"지원하지 않는 타입: {type(value)} - {value}")
+                return default
+                
+        except Exception as e:
+            logging.warning(f"숫자 변환 중 예외 발생: {value}, 오류: {e}")
+            return default
+                  
+    # 주식 데이터에서 주식코드만 추출하는 함수
+    async def extract_stock_codes(self) -> List[str]:
+        data = await self.kiwoom_module.get_account_info()
+        
+        # 입력 데이터가 문자열인 경우 JSON으로 파싱
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                print("잘못된 JSON 형식입니다.")
+                return []
+        
+        # acnt_evlt_remn_indv_tot 배열에서 stk_cd 추출
+        if 'acnt_evlt_remn_indv_tot' in data and isinstance(data['acnt_evlt_remn_indv_tot'], list):
+            return [item.get('stk_cd', '')[1:] for item in data['acnt_evlt_remn_indv_tot'] if 'stk_cd' in item]
+        
+        return []
+                      
+    def extract_holding_stocks_info(self, account_info):
+        """계좌 정보에서 보유 주식 정보 추출"""
+        holding_stocks = {}
+        
+        try:
+            if not account_info or not isinstance(account_info, dict):
+                logger.warning("계좌 정보가 없거나 잘못된 형식입니다.")
+                return holding_stocks
+            
+            # acnt_evlt_remn_indv_tot 배열에서 주식 정보 추출
+            stock_list = account_info.get('acnt_evlt_remn_indv_tot', [])
+            
+            for stock_item in stock_list:
+                try:
+                    # 종목코드 (A 제거)
+                    stock_code = stock_item.get('stk_cd', '')
+                    if stock_code.startswith('A'):
+                        stock_code = stock_code[1:]
+                    
+                    if not stock_code:
+                        continue
+                    
+                    # 보유 수량 (rmnd_qty)
+                    rmnd_qty_str = stock_item.get('rmnd_qty', '0')
+                    rmnd_qty = self.safe_int_convert(rmnd_qty_str)
+                    
+                    # 평균 매수가 (pur_pric)
+                    pur_pric_str = stock_item.get('pur_pric', '0')
+                    pur_pric = self.safe_int_convert(pur_pric_str)
+                    
+                    # 현재가 (cur_prc)
+                    cur_prc_str = stock_item.get('cur_prc', '0')
+                    cur_prc = self.safe_int_convert(cur_prc_str)
+                    
+                    # 종목명
+                    stock_name = stock_item.get('stk_nm', '')
+                    
+                    # 수익률
+                    prft_rt_str = stock_item.get('prft_rt', '0')
+                    try:
+                        prft_rt = float(prft_rt_str)
+                    except (ValueError, TypeError):
+                        prft_rt = 0.0
+                    
+                    # 보유 수량이 0보다 큰 종목만 저장
+                    if rmnd_qty > 0:
+                        holding_stocks[stock_code] = {
+                            'qty': rmnd_qty,           # 보유 수량
+                            'avg_price': pur_pric,     # 평균 매수가
+                            'current_price': cur_prc,  # 현재가
+                            'stock_name': stock_name,  # 종목명
+                            'profit_rate': prft_rt,    # 수익률
+                            'trade_able_qty': self.safe_int_convert(stock_item.get('trde_able_qty', '0'))  # 거래가능수량
+                        }
+                        
+                        logger.info(f"📊 보유 종목 발견: {stock_code}({stock_name}) - {rmnd_qty}주, 평단가: {pur_pric:,}원, 현재가: {cur_prc:,}원, 수익률: {prft_rt:.2f}%")
+                    
+                except Exception as e:
+                    logger.error(f"❌ 주식 정보 파싱 오류: {e}, 데이터: {stock_item}")
+                    continue
+            
+            logger.info(f"💼 총 보유 종목 수: {len(holding_stocks)}개")
+            return holding_stocks
+            
+        except Exception as e:
+            logger.error(f"❌ 보유 주식 정보 추출 실패: {e}")
+            return holding_stocks
+
+    def cond_to_list(self, data):
+        """
+        JSON 데이터에서 주식코드('9001' 필드)를 추출하여 리스트로 반환
+        A로 시작하는 경우 A를 제거하고 6자리 코드만 반환
+        
+        Args:
+            data: JSON 문자열 또는 딕셔너리
+        
+        Returns:
+            list: 주식코드 리스트 (6자리)
+        """
+        
+        # 문자열인 경우 JSON으로 파싱
+        if isinstance(data, str):
+            data = json.loads(data)
+        
+        stock_codes = []
+        
+        # 'data' 키가 있고 리스트인지 확인
+        if 'data' in data and isinstance(data['data'], list):
+            for item in data['data']:
+                if '9001' in item:
+                    code = item['9001']
+                    # A로 시작하는 경우 A 제거
+                    if code.startswith('A'):
+                        code = code[1:]
+                    stock_codes.append(code)
+        
+        return stock_codes
+
+    async def long_type_callback_0B(self, data: dict):
+        try:
+            values = data.get('values', {})   
+            stock_code = data.get('item')
+            stock_code = stock_code[1:] if stock_code and stock_code.startswith('A') else stock_code
+
                         
             if not stock_code:
                 logger.warning("0B 데이터에 종목코드가 없습니다.")
                 return
               
-
             current_price = abs(int(values.get('10', '0')))
+            high_price    = abs(int(values.get('17', '0')))
+            low_price    = abs(int(values.get('18', '0')))
+            execution_strength = float(values.get('228', '0'))
+            
+            
+            # 만약 현재 보유중이 주식일 경유 (매도 주문)
+            if stock_code in self.holding_stock :
+                   
+                # 고점 대비 현재가 비율 
+                if execution_strength >= 120 : high_turn_around_threshold = 1.01
+                elif execution_strength <= 100 : high_turn_around_threshold = 1.00
+                else : high_turn_around_threshold = 1.005
+              
+                tracking_data = await self.PT.get_price_info(stock_code)
+                
+                if not tracking_data:
+                    logger.warning(f"종목 {stock_code}의 추적 데이터가 없습니다.")
+                    return None
+                # 보유 수량 및 평균 매수가 추출
+                price_to_sell = tracking_data.get('price_to_sell', 0)
+                qty_to_sell = tracking_data.get('qty_to_sell', 0)
+                trade_price = tracking_data.get('trade_price', 0)
+                
+                # 정상적인 매도 상황
+                profit_rate = ((current_price - trade_price) / trade_price * 100) if trade_price > 0 else 0
+                profit_icon = "📈" if profit_rate >= 0 else "📉"
+                logger.info(f"{profit_icon} {stock_code} | 매수: {trade_price:,}원 → 현재: {current_price:,}원, 체결강도:{execution_strength} ({profit_rate:+.2f}%) | 보유: {qty_to_sell}주 | 목표: {price_to_sell:,}원")
+                                
+                if stock_code  not in self.trade_group: 
+                    if stock_code in self.holding_stock :
+                        self.holding_stock.remove(str(stock_code))
+                    await self.kiwoom_module.order_stock_sell(dmst_stex_tp="KRX",
+                                                              stk_cd=stock_code,
+                                                              ord_qty=str(qty_to_sell),
+                                                              ord_uv="",  # 시장가
+                                                              trde_tp="3",  # 시장가 주문
+                                                              cond_uv="")
 
-            #PT : PriceTracker    
-            if current_price > 0:       
-
-                IsFirst = await self.PT.isfirst(stock_code)
-                if IsFirst : 
-                    stock_info = self.account_info.get(stock_code, {}) if hasattr(self, 'account_info') and self.account_info else {}
-
-                    # 보유 수량 및 평균 매수가 추출
-                    current_qty_to_sell = int(stock_info.get('qty', 0))  # 보유 수량
-                    trade_price = int(stock_info.get('avg_price', 0))    # 평균 매수가
-                    logger.info(f"보유주식 업데이트 {stock_code} , 구매가 {trade_price}, 보유수{current_qty_to_sell}")
+                if current_price > price_to_sell and \
+                   high_price >= current_price * high_turn_around_threshold :
+                    logger.info(f"{stock_code} 매도 목표가 {price_to_sell}원 도달 ======> 매도주문 시작" )
+                    if stock_code in self.holding_stock :
+                        self.holding_stock.remove(str(stock_code))
+                    await self.kiwoom_module.order_stock_sell(dmst_stex_tp="KRX",
+                                                              stk_cd=stock_code,
+                                                              ord_qty=str(qty_to_sell),
+                                                              ord_uv="",  # 시장가
+                                                              trde_tp="3",  # 시장가 주문
+                                                              cond_uv="")
                     
-                    qty_to_buy = math.ceil((self.assigned_per_stock/current_price) / 10) * 10
-                    logger.info(f"{stock_code} 첫번째 실행 -> 매수 가능주식 : {qty_to_buy}")
-                    await self.PT.initialize_tracking( # 처음 값이 들어오면 qty_to_sell 계산
-                                                                  stock_code = stock_code,
-                                                                  current_price = 0, 
-                                                                  trade_price = trade_price, 
-                                                                  period_type = False,
-                                                                  isfirst = False,
-                                                                  isafternoon = False,
-                                                                  qty_to_sell = current_qty_to_sell,
-                                                                  qty_to_buy = qty_to_buy - current_qty_to_sell,
-                                                                  trade_type = "HOLD" )
-                else : 
-                    await self.PT.update_tracking_data( stock_code = stock_code, 
-                                                        current_price = current_price)
+                # 손절 매매(매매가 대비 10% 하락, 체결강도 100 이하시 손절 매도)
+                if current_price <= trade_price * 0.95 and execution_strength <= 100 or \
+                   current_price <= trade_price * 0.9 :
+                    logger.info(f"{stock_code} 매수가 {trade_price}원 대비 손절 조건 하락 => 손절매매 " )
+                    if stock_code in self.holding_stock :
+                        self.holding_stock.remove(str(stock_code))
+                    await self.kiwoom_module.order_stock_sell(dmst_stex_tp="KRX",
+                                                              stk_cd=stock_code,
+                                                              ord_qty=str(qty_to_sell),
+                                                              ord_uv="",  # 시장가
+                                                              trde_tp="3",  # 시장가 주문
+                                                              cond_uv="")    
+                    
+            # 현재 보유하지 않은 주식(매수 주문)
+            else : 
+                # 고점 대비 현재가 비율 
+                if execution_strength <= 80 : low_turn_around_threshold = 1.01
+                elif execution_strength <= 100 : low_turn_around_threshold = 1.005
+                else : low_turn_around_threshold = 1.00
+                
+                tracking_data = await self.PT.get_price_info(stock_code)
+                if not tracking_data:
+                    logger.warning(f"종목 {stock_code}의 추적 데이터가 없습니다.")
+                    return None
+                price_to_buy = tracking_data.get('price_to_buy', 0)
+                ord_qty = tracking_data.get('qty_to_buy',1)
+                
+                price_diff = current_price - price_to_buy
+                diff_icon = "⬇️" if price_diff > 0 else "✅" if price_diff == 0 else "⬆️"
+                logger.info(f"🛒 {stock_code} | 현재: {current_price:,}원, 체결강도: {execution_strength} {diff_icon} 목표: {price_to_buy:,}원 | 주문: {ord_qty}주")
+                
+                # 계산보다 20% 추가 매매 - 최소 1주
+                if  current_price <= price_to_buy and \
+                    current_price >= low_price * low_turn_around_threshold and \
+                    stock_code not in self.trade_done :
+                    self.trade_done.append(stock_code)
+                    await self.kiwoom_module.order_stock_buy(dmst_stex_tp="KRX",
+                                                              stk_cd=stock_code,
+                                                              ord_qty=str(ord_qty),
+                                                              ord_uv="",  # 시장가
+                                                              trde_tp="3",  # 시장가 주문
+                                                              cond_uv="")
 
         except Exception as e:
             logger.error(f"0B 데이터 처리 중 오류: {str(e)}")
-            # logger.error(f"원본 데이터: {data}")  
 
-    async def type_callback_0D(self, data: dict): pass
+    # 🆕 수정된 short_trading_handler - 거래 태스크 생성
+    async def long_trading_handler(self) : # 조건검색 으로 코드 등록 
+        try:
+            # if self.isfirst :
+            if True :
+                await self.realtime_group_module.delete_by_group(0)
+                await self.realtime_group_module.delete_by_group(1)
+                await self.realtime_group_module.create_new(group=0, data_type=[], stock_code=[])
+                await self.realtime_group_module.create_new(group=1, data_type=[], stock_code=[])
+                # 조건 검색 요청 => 자동으로 realtime_group 에 추가됨
+                con_list = await self.realtime_module.get_condition_list()
+                logger.info(con_list)
+                logger.info(self.deposit)
+                
+                await asyncio.sleep(0.3)
+                await self.realtime_module.request_condition_search(seq="0")
+                await asyncio.sleep(0.3)
+                await self.realtime_module.request_condition_search(seq="1")
+                await asyncio.sleep(0.3)
+                
+            # 계좌 정보에서 보유 주식 정보 추출 / 매도수량 관리용
+            account_info = await self.kiwoom_module.get_account_info()
+            #주식코드, 보유수량, 평균 매매가격
+            self.account_info = self.extract_holding_stocks_info(account_info)
+            
+            # 조건 검색으로 만들어진 그룹   
+            cond_list = await self.realtime_group_module.get_all_groups()  
+            
+            # 현재 보유주식과 조건검색에서 찾은 모든 코드를 통합 
+            condition_stock_codes = [code for group in cond_list for code in group.stock_code]
 
+            all_stock_codes = list(set(condition_stock_codes + self.holding_stock)) 
+            for stock_code in all_stock_codes : 
+                await self.PT.initialize_tracking(stock_code = stock_code,
+                                                  current_price = 0,     
+                                                  trade_price = 0, 
+                                                  period_type= False, 
+                                                  isfirst = False,
+                                                  price_to_buy = 0,
+                                                  price_to_sell = 0,
+                                                  qty_to_sell = 0,
+                                                  qty_to_buy = 0,
+                                                  ma20_slope = 0,
+                                                  ma20_avg_slope = 0,
+                                                  ma20 = 0,
+                                                  trade_type="HOLD") 
+            
+ 
+            # 종목들에 대해 거래 태스크 생성
+            tasks = []
+            self.trade_group =[]
+            
+            logger.info(f"보유주식수 = > {len(self.holding_stock)}")
+            logger.info(f"조건검색 주식수 = > {len(condition_stock_codes)}")
+            logger.info(f"처리해야할 주식수 = > {len(all_stock_codes)}")
 
+            stock_qty =0 
+            i=0
+            j=0
+            for code in all_stock_codes :
+                try:
+                    j += 1
+                    base_df = await self.LTH.daily_chart_to_df(code)
+                    odf = self.LTH.process_daychart_df(base_df)
+                    dec_price5, dec_price10,dec_price20, = self.LTH.price_expectation(odf)
+                    logger.info(f"주식 {code} : {dec_price5},{dec_price10},{dec_price20}")
+
+                    df = odf.head(20)
+                    buy_price20 = int(odf.iloc[0]["ma20"])
+                    buy_price10 = int(odf.iloc[0]["ma10"])
+                    buy_price5 = int(odf.iloc[0]["ma5"])
+                    sell_price20 = int(odf.iloc[0]["ma20"] * 1.10)
+                    sell_price10 = int(odf.iloc[0]["ma10"] * 1.08)
+                    sell_price5 = int(odf.iloc[0]["ma5"] * 1.05)
+                    ma20_dif = round(((odf.iloc[0]['close'] -odf.iloc[0]['ma20']) / odf.iloc[0]['close'] * 100),2)
+                    ma10_dif = round(((odf.iloc[0]['close'] -odf.iloc[0]['ma10']) / odf.iloc[0]['close'] * 100),2)
+                    ma5_dif = round(((odf.iloc[0]['close'] -odf.iloc[0]['ma5']) / odf.iloc[0]['close'] * 100),2)
+                    current_price = int(odf.iloc[0]["close"])
+                    if ma5_dif >= 5: 
+                        buy_price = buy_price5
+                        sell_price =  sell_price5
+                        step = 'ma5'
+                    elif ma10_dif >= 5 :
+                        buy_price = buy_price10
+                        sell_price =  sell_price10    
+                        step = 'ma10'
+                    else :
+                        buy_price = buy_price20
+                        sell_price =  sell_price20 
+                        step = 'ma20'
+                    
+                    avg_slope = self.LTH.average_slope(df)
+                    
+                    # 매수 가능한 주식만 선별해서 trade_group에 추가
+                    if  avg_slope['avg_ma20_slope'] >= 0.1 and odf.iloc[0]["ma20_slope"] >= 0.1 :
+                        stock_qty += 1
+                        self.trade_group.append(code)
+                        
+                        await self.PT.update_tracking_data( stock_code = code, 
+                                                            current_price=current_price,
+                                                            price_to_buy = buy_price,
+                                                            price_to_sell = sell_price,
+                                                            ma5  = dec_price5,
+                                                            ma10 = dec_price10,
+                                                            ma20 = dec_price20
+                                                          )  
+                        logger.info(f" {stock_qty} 번째 {code} : {ma5_dif}%  {ma10_dif}%  {ma20_dif}% : {step} => {odf.iloc[0]['close']} {buy_price} {sell_price} ")
+
+                    
+                    if code in self.holding_stock :
+                        try:
+                            # 각 주식 정보 추출
+                            stock_info = self.account_info.get(code, {}) 
+                            qty = int(stock_info.get('qty', 0))  # 보유 수량
+                            avg_price = int(stock_info.get('avg_price', 0))    # 평균 매수가
+                            i +=1
+                            sell_price = max(sell_price, int(avg_price*1.1))
+                            profit = round(((sell_price-avg_price)/avg_price * 100),2)
+                            logger.info(f" ✅ {i} 번째 {code} - 현재가 : {current_price}, 매수가 : {avg_price}, 매도목표가 : {sell_price}, 매도이윤 : {profit}% 수량 : {qty} ")
+                            res = await self.PT.update_tracking_data( stock_code = code,
+                                                                      current_price = current_price,     
+                                                                      trade_price = avg_price,
+                                                                      price_to_sell = sell_price,
+                                                                      qty_to_sell = qty,
+                                                                      trade_type="BUY"
+                                                                      )
+                        except Exception as e:
+                            logger.error(f"❌ {stock_code} 처리 중 오류: {str(e)}")
+                            continue
+                    
+                    
+                except Exception as e:
+                    logger.error(f"❌ 종목 {code} 초기화 오류: {str(e)}")
+                    
+            
+            self.assigned_per_stock = int(self.deposit / stock_qty)        
+            logger.info(f"🎯 조건검색 완료: {stock_qty}개 종목, {len(tasks)}개 거래 태스크 생성")
+            logger.info(f"💰 종목당 할당 금액: {self.assigned_per_stock:,}원")
+            k = 0
+            for stock_code in self.trade_group :
+                k += 1
+                tracking_data = await self.PT.get_price_info(stock_code)
+                price_to_buy = tracking_data.get('price_to_buy', 1)
+                qty_to_buy = math.ceil(self.assigned_per_stock / price_to_buy * 1.5)
+                res = await self.PT.update_tracking_data( stock_code = stock_code,
+                                                          qty_to_buy = qty_to_buy)
+                logger.info(f"{k}번째 주식 {stock_code} : {self.assigned_per_stock} / {price_to_buy} * 1.5  = {qty_to_buy}")
+
+            all_stock_codes = list(set(self.trade_group + self.holding_stock)) 
+            
+            # 실시간 종목 등록 
+            await self.realtime_module.subscribe_realtime_price(group_no="0", 
+                        items=all_stock_codes, 
+                        data_types=["00","0B","04"], 
+                        refresh=True)   
+            
+            
+        except Exception as e:
+            logger.error(f"❌ short_trading_handler 메서드 전체 오류: {str(e)}")
+            raise
+            
     # 주식 데이터에서 코드를 추출하고 시장별로 분류하는 함수 - 수정된 버전
     async def stock_codes_grouping(self, data):
         logger.info("stock_codes_grouping 실행")
@@ -908,118 +1576,7 @@ class ProcessorModule:
             # 🔧 추가: 스택 트레이스 로깅
             import traceback
             logger.error(f"스택 트레이스: {traceback.format_exc()}")
-
-    # 🆕 수정된 short_trading_handler - 거래 태스크 생성
-    async def short_trading_handler(self) : # 조건검색 으로 코드 등록 
-        try:
-            if self.isfirst :
-                await self.realtime_group_module.delete_by_group(0)
-                await self.realtime_group_module.delete_by_group(1)
-                await self.realtime_group_module.create_new(group=0, data_type=[], stock_code=[])
-                await self.realtime_group_module.create_new(group=1, data_type=[], stock_code=[])
-                # 조건 검색 요청 => 자동으로 realtime_group 에 추가됨
-                await self.realtime_module.get_condition_list()
-                await asyncio.sleep(0.3)
-                await self.realtime_module.request_condition_search(seq="0")
-                await asyncio.sleep(0.3)
-                await self.realtime_module.request_condition_search(seq="1")
-                await asyncio.sleep(0.3)
-                
-            # 계좌 정보에서 보유 주식 정보 추출 / 매도수량 관리용
-            holding_stocks_info = await self.kiwoom_module.get_account_info()
-            self.account_info = self.extract_holding_stocks_info(holding_stocks_info)
-     
-            # 조건 검색으로 만들어진 그룹   
-            res = await self.realtime_group_module.get_all_groups()  
             
-            # 현재 보유주식과 조건검색에서 찾은 모든 코드를 통합 
-            condition_stock_codes = [code for group in res for code in group.stock_code]
-            all_stock_codes = list(set(condition_stock_codes + self.holding_stock)) 
-            
-            # 각 종목별로 거래 가능금액 배당
-            stock_qty = len(all_stock_codes)
-            stock_qty =  stock_qty if stock_qty >= 1 else 50 
-            self.assigned_per_stock = int(self.deposit / stock_qty)
-            
-            # 종목들에 대해 거래 태스크 생성
-            tasks = []
-            for code in all_stock_codes :
-                try:
-                    # 트래킹 초기화
-                    await self.PT.initialize_tracking( 
-                        stock_code = code, 
-                        current_price = 0,
-                        trade_price = 0, 
-                        period_type = False,
-                        isfirst = True,
-                        isafternoon=True,
-                        qty_to_sell = 0,
-                        qty_to_buy = 0,
-                        trade_type = "HOLD" 
-                    )
-                    
-                    task = asyncio.create_task(self.trader_executor(code))
-                    tasks.append(task)
-                
-                except Exception as e:
-                    logger.error(f"❌ 종목 {code} 초기화 오류: {str(e)}")
-                    
-            logger.info(f"🎯 조건검색 완료: {len(all_stock_codes)}개 종목, {len(tasks)}개 거래 태스크 생성")
-            logger.info(f"💰 종목당 할당 금액: {self.assigned_per_stock:,}원")
-            
-            # 2️⃣ 분석 스케줄러 태스크 등록
-            analysis_task = asyncio.create_task(self.run_analysis_scheduler(all_stock_codes))
-            tasks.append(analysis_task)
-
-            # 🆕 생성된 태스크들을 클래스 변수에 저장 (shutdown에서 정리하기 위해)
-            self.trading_tasks = tasks
-            
-            # 실시간 종목 등록 
-            await self.realtime_module.subscribe_realtime_price(group_no="0", 
-                        items=all_stock_codes, 
-                        data_types=["00","0B","04"], 
-                        refresh=True)   
-                     
-
-        except Exception as e:
-            logger.error(f"❌ short_trading_handler 메서드 전체 오류: {str(e)}")
-            raise
-    
-    def safe_int_convert(self, value, default=0):
-        """문자열을 안전하게 정수로 변환"""
-        try:
-            if value is None:
-                return default
-            
-            if isinstance(value, (int, float)):
-                return int(value)
-            
-            if isinstance(value, str):
-                cleaned = value.strip()
-                if not cleaned or cleaned == '':
-                    return default
-                
-                # 숫자가 아닌 문자가 포함된 경우 체크
-                if not all(c.isdigit() or c in '.-+' for c in cleaned.replace(',', '')):
-                    logging.warning(f"숫자가 아닌 문자 포함: '{value}'")
-                    return default
-                
-                try:
-                    # 콤마 제거 후 float으로 먼저 변환 후 int로 변환
-                    return int(float(cleaned.replace(',', '')))
-                except ValueError:
-                    logging.warning(f"숫자 변환 불가: '{value}'")
-                    return default
-            
-            else:
-                logging.warning(f"지원하지 않는 타입: {type(value)} - {value}")
-                return default
-                
-        except Exception as e:
-            logging.warning(f"숫자 변환 중 예외 발생: {value}, 오류: {e}")
-            return default
-                  
-
     # 자동 취소 체크 메서드들 (개선된 버전)
     async def auto_cancel_checker(self):
         """10초마다 미체결 주문 체크하여 자동 취소"""
@@ -1262,111 +1819,3 @@ class ProcessorModule:
                 logging.warning(f"🗑️ 예외 발생으로 Redis에서 제거: {target['order_data'].get('9203', 'unknown')}")
             except Exception as cleanup_error:
                 logging.error(f"❌ Redis 정리 중 오류: {cleanup_error}")
-
-    # 주식 데이터에서 주식코드만 추출하는 함수
-    async def extract_stock_codes(self) -> List[str]:
-        data = await self.kiwoom_module.get_account_info()
-        
-        # 입력 데이터가 문자열인 경우 JSON으로 파싱
-        if isinstance(data, str):
-            try:
-                data = json.loads(data)
-            except json.JSONDecodeError:
-                print("잘못된 JSON 형식입니다.")
-                return []
-        
-        # acnt_evlt_remn_indv_tot 배열에서 stk_cd 추출
-        if 'acnt_evlt_remn_indv_tot' in data and isinstance(data['acnt_evlt_remn_indv_tot'], list):
-            return [item.get('stk_cd', '')[1:] for item in data['acnt_evlt_remn_indv_tot'] if 'stk_cd' in item]
-        
-        return []
-  
-    # 오늘 날짜를 확인하여 첫 번째 접근인지 체크하고 상태를 업데이트합니다.
-    async def isfirst_start(self) -> bool:
-        today = date.today()
-        
-        async with self.postgres_db.get_session() as session:
-            statement = select(IsFirst).where(IsFirst.check_date == today)
-            result = await session.exec(statement)
-            existing_record = result.first()
-            
-            if existing_record is None:
-                new_record = IsFirst(check_date=today, is_first=False)
-                session.add(new_record)
-                await session.commit()
-                return True
-            else:
-                if existing_record.is_first:
-                    existing_record.is_first = False
-                    await session.commit()
-                    return True
-                else:
-                    return False
-                      
-    def extract_holding_stocks_info(self, account_info):
-        """계좌 정보에서 보유 주식 정보 추출"""
-        holding_stocks = {}
-        
-        try:
-            if not account_info or not isinstance(account_info, dict):
-                logger.warning("계좌 정보가 없거나 잘못된 형식입니다.")
-                return holding_stocks
-            
-            # acnt_evlt_remn_indv_tot 배열에서 주식 정보 추출
-            stock_list = account_info.get('acnt_evlt_remn_indv_tot', [])
-            
-            for stock_item in stock_list:
-                try:
-                    # 종목코드 (A 제거)
-                    stock_code = stock_item.get('stk_cd', '')
-                    if stock_code.startswith('A'):
-                        stock_code = stock_code[1:]
-                    
-                    if not stock_code:
-                        continue
-                    
-                    # 보유 수량 (rmnd_qty)
-                    rmnd_qty_str = stock_item.get('rmnd_qty', '0')
-                    rmnd_qty = self.safe_int_convert(rmnd_qty_str)
-                    
-                    # 평균 매수가 (pur_pric)
-                    pur_pric_str = stock_item.get('pur_pric', '0')
-                    pur_pric = self.safe_int_convert(pur_pric_str)
-                    
-                    # 현재가 (cur_prc)
-                    cur_prc_str = stock_item.get('cur_prc', '0')
-                    cur_prc = self.safe_int_convert(cur_prc_str)
-                    
-                    # 종목명
-                    stock_name = stock_item.get('stk_nm', '')
-                    
-                    # 수익률
-                    prft_rt_str = stock_item.get('prft_rt', '0')
-                    try:
-                        prft_rt = float(prft_rt_str)
-                    except (ValueError, TypeError):
-                        prft_rt = 0.0
-                    
-                    # 보유 수량이 0보다 큰 종목만 저장
-                    if rmnd_qty > 0:
-                        holding_stocks[stock_code] = {
-                            'qty': rmnd_qty,           # 보유 수량
-                            'avg_price': pur_pric,     # 평균 매수가
-                            'current_price': cur_prc,  # 현재가
-                            'stock_name': stock_name,  # 종목명
-                            'profit_rate': prft_rt,    # 수익률
-                            'trade_able_qty': self.safe_int_convert(stock_item.get('trde_able_qty', '0'))  # 거래가능수량
-                        }
-                        
-                        logger.info(f"📊 보유 종목 발견: {stock_code}({stock_name}) - {rmnd_qty}주, 평단가: {pur_pric:,}원, 현재가: {cur_prc:,}원, 수익률: {prft_rt:.2f}%")
-                    
-                except Exception as e:
-                    logger.error(f"❌ 주식 정보 파싱 오류: {e}, 데이터: {stock_item}")
-                    continue
-            
-            logger.info(f"💼 총 보유 종목 수: {len(holding_stocks)}개")
-            return holding_stocks
-            
-        except Exception as e:
-            logger.error(f"❌ 보유 주식 정보 추출 실패: {e}")
-            return holding_stocks
