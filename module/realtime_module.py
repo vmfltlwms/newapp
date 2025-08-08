@@ -8,7 +8,7 @@ import json
 from config import settings
 from container.socket_container import Socket_Container
 from module.socket_module import SocketModule
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("RealtimeModule")
 
 class RealtimeModule:
     """키움 API와 통신하는 클라이언트"""

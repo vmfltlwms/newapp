@@ -13,7 +13,7 @@ from db.redis_db import RedisDB
 from module.token_module import TokenModule
 from utils.dummy import stock_data_stream #test 용 더미 데이터 생산산
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("SocketModule")
 
 class SocketModule:
     """키움 API와 통신하는 클라이언트"""

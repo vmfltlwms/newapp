@@ -10,7 +10,7 @@ import requests
 from typing import Callable, Any, Dict
 import time
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("KiwoomModule")
 
 class KiwoomModule:
     """키움 API와 통신하는 클라이언트 - 큐 기반 API 호출 제어"""

@@ -23,15 +23,7 @@ from module.realtime_module import RealtimeModule
 from redis_util.price_tracker_service import PriceTracker
 from utils.long_trading import LongTradingAnalyzer
 
-logger = logging.getLogger(__name__)
-log_path = f"logs/new_trading_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-os.makedirs(os.path.dirname(log_path), exist_ok=True)
-
-file_handler = logging.FileHandler(log_path, encoding='utf-8')
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
-
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logger = logging.getLogger("ProcessorModule")
 
 class ProcessorModule:
     @inject
@@ -743,6 +735,8 @@ class ProcessorModule:
         # 보유주식에 대한 기본 익절/손절만 실행
         if stock_code in self.holding_stock:
             await self.basic_sell_logic(stock_code, market_data)
+        
+        await self.conservative_buy_logic(stock_code, market_data)
 
     async def active_trading_strategy(self, market_data):
         """09:30-12:00 적극 매매 전략"""
@@ -767,47 +761,99 @@ class ProcessorModule:
             await self.conservative_buy_logic(stock_code, market_data)
     
     # 🔥 매수가 계산 함수
-    def calculate_unified_buy_price(self, market_data, tracker_buy_price=0):
-        """통합 매수가 계산 - 단순화된 버전"""
+    def get_or_set_price_0930(self, stock_code, current_price):
+        if stock_code not in self.price_at_0930:
+            self.price_at_0930[stock_code] = current_price
+            logger.debug(f"📊 {stock_code} 09:30 기준가 설정: {current_price:,}원")
         
+        return self.price_at_0930[stock_code]
+      
+    def calculate_unified_buy_price(self, market_data, tracker_buy_price=0):
+        """통합 매수가 계산 - 요구사항 완전 반영 버전"""
+        
+        stock_code = market_data['stock_code']
         current_price = market_data['current_price']
         open_price = market_data['open_price']
         kospi_index = self.kospi_index
         
-        # 1단계: 코스피 지수로 기본 할인율 결정
+        # 09:30 기준가 사용 (없으면 현재가로 설정하고 저장)
+        price_0930 = self.get_or_set_price_0930(stock_code, current_price)
+        
+        if open_price <= 0:
+            logger.warning(f"{stock_code} 시가 정보 없음 - 09:30 기준가로 계산")
+            open_price = price_0930
+        
+        # 시가 대비 09:30 기준가 변동률 계산
+        price_change_rate = (price_0930 - open_price) / open_price
+        
+        # 기준가 선택 (시가와 09:30 기준가 중 작은 값)
+        reference_price = min(price_0930, open_price)
+        
+        calculated_price = 0
+        
+        # 코스피 지수별 매수 전략
         if kospi_index >= 1.5:
-            base_discount = 0.015      # 강세장: 1.5% 할인
+            # 코스피 +1.5% 이상 (강세장)
+            if abs(price_change_rate) <= 0.01:  # +/-1% 이내
+                calculated_price = int(reference_price * 0.985)  # -1.5%
+            elif price_change_rate > 0.01:  # +1% 이상 상승
+                # 시가 또는 09:30가 대비 -2.0% 중 큰 가격에서 매수
+                open_based = int(open_price * 0.98)
+                price_0930_based = int(price_0930 * 0.98)
+                calculated_price = max(open_based, price_0930_based)
+            else:  # -1% 이하 하락
+                # 09:30가 대비 -1.0% 또는 tracker_buy_price 중 작은 가격
+                price_0930_based = int(price_0930 * 0.99)
+                if tracker_buy_price > 0:
+                    calculated_price = min(price_0930_based, tracker_buy_price)
+                else:
+                    calculated_price = price_0930_based
+                    
         elif kospi_index <= -1.5:
-            base_discount = 0.025      # 약세장: 2.5% 할인  
+            # 코스피 -1.5% 이하 (약세장)
+            if abs(price_change_rate) <= 0.01:  # +/-1% 이내
+                calculated_price = int(reference_price * 0.975)  # -2.5%
+            elif price_change_rate > 0.01:  # +1% 이상 상승
+                # 시가 또는 09:30가 대비 -2.0% 중 작은 가격
+                open_based = int(open_price * 0.98)
+                price_0930_based = int(price_0930 * 0.98)
+                calculated_price = min(open_based, price_0930_based)
+            else:  # -1% 이하 하락
+                # 시가 또는 09:30가 대비 -2.5% 중 작은 가격 또는 tracker_buy_price 중 최소값
+                open_based = int(open_price * 0.975)
+                price_0930_based = int(price_0930 * 0.975)
+                price_candidates = [open_based, price_0930_based]
+                if tracker_buy_price > 0:
+                    price_candidates.append(tracker_buy_price)
+                calculated_price = min(price_candidates)
+                
         else:
-            base_discount = 0.02       # 보통장: 2.0% 할인
+            # 코스피 -1.5% ~ +1.5% (보통장)
+            if abs(price_change_rate) <= 0.01:  # +/-1% 이내
+                calculated_price = int(reference_price * 0.98)  # -2.0%
+            elif price_change_rate > 0.01:  # +1% 이상 상승
+                # 시가 또는 09:30가 대비 -2% 중 작은 가격
+                open_based = int(open_price * 0.98)
+                price_0930_based = int(price_0930 * 0.98)
+                calculated_price = min(open_based, price_0930_based)
+            else:  # -1% 이하 하락
+                # 09:30가 대비 -2% 또는 tracker_buy_price 중 작은 가격
+                price_0930_based = int(price_0930 * 0.98)
+                if tracker_buy_price > 0:
+                    calculated_price = min(price_0930_based, tracker_buy_price)
+                else:
+                    calculated_price = price_0930_based
         
-        # 2단계: 현재가/시가 비교로 추가 할인 계산
-        if open_price > 0:
-            price_change_rate = (current_price - open_price) / open_price
-            
-            if price_change_rate > 0.01:        # +1% 이상 상승
-                additional_discount = 0.005     # 0.5% 추가 할인
-            elif price_change_rate < -0.01:     # -1% 이상 하락  
-                additional_discount = -0.005    # 0.5% 할인 줄임 (더 적극적)
-            else:
-                additional_discount = 0         # 변화 없음
-        else:
-            additional_discount = 0
-        
-        # 3단계: 최종 매수가 계산
-        total_discount = base_discount + additional_discount
-        reference_price = min(current_price, open_price) if open_price > 0 else current_price
-        calculated_price = int(reference_price * (1 - total_discount))
-        
-        # 4단계: tracker_buy_price와 비교해서 더 안전한 가격 선택
+        # 최종 가격 결정
         if tracker_buy_price > 0:
-            final_buy_price = min(calculated_price, tracker_buy_price)  # 이 부분 수정
+            final_buy_price = min(calculated_price, tracker_buy_price)
         else:
             final_buy_price = calculated_price
         
-        logger.debug(f"💰 매수가 계산: 기준가 {reference_price:,}원 × (1-{total_discount:.3f}) = {calculated_price:,}원 "
-                    f"→ 최종: {final_buy_price:,}원")
+        logger.debug(f"💰 {stock_code} 매수가 계산 [코스피: {kospi_index:.1f}%]")
+        logger.debug(f"   시가: {open_price:,}원, 09:30가: {price_0930:,}원 (변동: {price_change_rate:.2%})")
+        logger.debug(f"   계산가: {calculated_price:,}원, 추적가: {tracker_buy_price:,}원")
+        logger.debug(f"   → 최종: {final_buy_price:,}원")
         
         return final_buy_price
 
@@ -915,9 +961,6 @@ class ProcessorModule:
         high_price = market_data['high_price']
         
         try:
-            if not self.PT:
-                return
-                
             tracking_data = await self.PT.get_price_info(stock_code)
             if not tracking_data:
                 logger.warning(f"⚠️ {stock_code} 추적 데이터 없음")
@@ -1085,13 +1128,14 @@ class ProcessorModule:
             if stock_code not in self.long_trade_code:
                 return
                 
+            if self.kospi_index <= -3.0 :
+                logger.debug(f"📵 [매수금지] {stock_code} - 코스피 {self.kospi_index}% <= -3%")
+                return
+              
             # 이미 거래 완료된 종목은 제외
             if stock_code in self.trade_done:
                 return
             
-            if not self.PT:
-                return
-                
             # 추적 데이터에서 매수 정보 조회
             tracking_data = await self.PT.get_price_info(stock_code)
             if not tracking_data:

@@ -12,7 +12,8 @@ from db.redis_db import RedisDB
 from module.kiwoom_module import KiwoomModule
 from module.socket_module import SocketModule
 from redis_util.price_tracker_service import PriceTracker
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("Trading_Handler")
 
 class Trading_Handler:
     def __init__(self, 

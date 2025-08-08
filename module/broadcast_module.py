@@ -8,7 +8,7 @@ from dependency_injector.wiring import inject, Provide
 from container.redis_container import Redis_Container
 from db.redis_db import RedisDB
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("BroadcastModule")
 
 class BroadcastModule:
     """Redis Pub/Sub과 WebSocket 연결 관리를 통합한 클래스"""

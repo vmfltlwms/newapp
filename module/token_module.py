@@ -3,7 +3,7 @@ import requests
 from config import settings
 import time
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("TokenModule")
 
 class TokenModule:
     def __init__(self):

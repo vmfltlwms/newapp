@@ -7,7 +7,7 @@ from container.redis_container import Redis_Container
 from db.redis_db import RedisDB
 from api.socket_broadcast import manager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("WebSocketBroadcast")
 
 class WebSocketBroadcast:
     """Redis Pub/Sub과 WebSocket을 연결하는 브리지"""

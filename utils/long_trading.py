@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from module.kiwoom_module import KiwoomModule
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("LongTradingAnalyzer")
 
 class LongTradingAnalyzer:
     """0B 타입 주식 체결 데이터 분석기"""
