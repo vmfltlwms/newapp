@@ -1,5 +1,5 @@
 # 필요한 개수만큼 자르기 (최신 데이터부터)
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta,  time as datetime_time
 import logging
 import numpy as np
 import pandas as pd
@@ -24,9 +24,15 @@ class LongTradingAnalyzer:
         price_type: str = "1"
     ) -> pd.DataFrame:
         """Kiwoom API에서 일봉 데이터를 받아 DataFrame으로 변환 (가공 전)"""
-        
+
         if not base_dt:
-            base_dt = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+            now = datetime.now()
+            nine_am = datetime_time(9, 0)
+
+            if now.time() < nine_am:
+                base_dt = (now - timedelta(days=1)).strftime("%Y%m%d")
+            else:
+                base_dt = now.strftime("%Y%m%d")
         
         response = await self.kiwoom_client.get_daily_chart(
             code=stock_code,

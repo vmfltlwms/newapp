@@ -155,7 +155,7 @@ class RealtimeModule:
             request_data = {
                 'trnm': 'REG',                      # 등록 명령
                 'grp_no': str(group_no),            # 그룹 번호
-                'refresh': '1' if refresh else '0', # 새로고침 여부
+                'refresh': '0' if refresh else '1', # True : 새로고침
                 'data': [{
                     'item': items,                  # 종목 코드 리스트
                     'type': data_types              # 데이터 타입 리스트
