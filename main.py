@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 import uvicorn
+
 from utils.set_logger import SetLogger
 
 from container.token_container import Token_Container
@@ -174,8 +175,8 @@ async def root():
 # -----------------------
 if __name__ == "__main__":
     scheduler     = create_trading_scheduler(
-    start_time    = "09:00",
-    end_time      = "15:30",
+    start_time    = "08:30",
+    end_time      = "16:00",
     weekdays_only = True )
     scheduler.run()
 

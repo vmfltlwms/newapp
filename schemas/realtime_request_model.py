@@ -32,7 +32,7 @@ class RealtimePriceRequest(SQLModel):
     refresh: bool = Field(default=True, description="기존 등록 유지 여부")
     
     class Config:
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "group_no": "1",
                 "items": ["005930", "000660"],
@@ -48,7 +48,7 @@ class RealtimePriceUnsubscribeRequest(SQLModel):
     data_types: Optional[List[str]] = Field(default=None, description="취소할 데이터 타입 리스트")
     
     class Config:
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "group_no": "1",
                 "items": ["005930"],
@@ -65,7 +65,7 @@ class ConditionalSearchRequest(SQLModel):
     next_key: str = Field(default="", description="다음 조회 키")
     
     class Config:
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "seq": "4",
                 "search_type": "0",

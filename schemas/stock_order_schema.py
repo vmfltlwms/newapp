@@ -23,7 +23,7 @@ class StockBuyRequest(StockOrderBase):
     order_type: str = Field("buy", description="주문구분")
     
     class Config:
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "user_id": "user123",
                 "stock_code": "005930",
@@ -41,7 +41,7 @@ class StockSellRequest(StockOrderBase):
     order_type: str = Field("sell", description="주문구분")
     
     class Config:
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "user_id": "user123",
                 "stock_code": "005930",
@@ -66,7 +66,7 @@ class StockModifyRequest(BaseModel):
     order_type: str = Field("modify", description="주문구분")
     
     class Config:
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "user_id": "user123",
                 "original_order_no": "20240528001",
@@ -88,7 +88,7 @@ class StockCancelRequest(BaseModel):
     order_type: str = Field("cancel", description="주문구분")
     
     class Config:
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "user_id": "user123",
                 "original_order_no": "20240528001",

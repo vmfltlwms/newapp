@@ -1,7 +1,6 @@
 # module.processor_module.py - 수정된 버전
-import math
 import os
-from data.stock_code import KOSPI 
+from data.market_code import KOSPI, KOSDAQ 
 from data.holiday import holidays
 from datetime import date, datetime, timedelta, time as datetime_time
 from zoneinfo import ZoneInfo
@@ -93,9 +92,6 @@ class ProcessorModule:
           '0J': self.type_callback_0J,
         }
         
-
-
-        
     async def initialize(self) : # 현재 보유주식별 주식수, 예수금, 주문 취소 확인 및 실행
 
         try:
@@ -123,6 +119,17 @@ class ProcessorModule:
             self.deposit = 0
             raise
 
+        try:
+            await self.realtime_module.subscribe_realtime_price(
+                group_no="0", 
+                items=['001', '101'],  # 코스피, 코스닥 지수
+                data_types=["0J"], 
+                refresh=True
+            )
+            logger.info("코스피, 코스닥 지수 실시간 등록 완료")
+        except Exception as e:
+            logger.error(f"코스피 코스닥 실시간 등록 실패: {str(e)}")
+            # 지수 등록 실패는 치명적이지 않으므로 계속 진행
     """프로세서 모듈 종료 및 리소스 정리"""
     async def shutdown(self):
         try:
@@ -155,13 +162,6 @@ class ProcessorModule:
             logging.info("🛑 프로세서 모듈 종료 완료")
         except Exception as e:
             logging.error(f"프로세서 모듈 종료 중 오류 발생: {str(e)}")
-
-    def is_market_time(self) -> bool:
-        """시장 거래 시간 확인"""
-        current_time = datetime.now(self.timezone).time()
-        market_open = datetime_time(9, 0)
-        market_close = datetime_time(15, 30)
-        return market_open <= current_time <= market_close
 
     # 클린 deposit
     async def clean_deposit(self) -> int :
@@ -330,7 +330,7 @@ class ProcessorModule:
         pass
 
     async def trnm_callback_cnsrreq(self, response:dict):
-        logger.info("trnm_callback_cnsrreq 실행")
+        logger.info(f"trnm_callback_cnsrreq 실행 ")
 
     async def trnm_callback_cnsrclr(self, response:dict):
         pass
@@ -472,6 +472,12 @@ class ProcessorModule:
             if is_cancelled or is_rejected:
                 order_data['902'] = '0'  # 미체결수량 0으로 설정
                 
+                # 🆕 order_execution_tracker에서 해당 종목 제거
+                if stock_code in self.order_execution_tracker:
+                    del self.order_execution_tracker[stock_code]
+                    logger.info(f"취소/거부된 주문 추적 데이터 정리: {stock_code}")
+                
+                
                 # 예수금 업데이트
                 prev_deposit = self.deposit
                 self.deposit = await self.clean_deposit()
@@ -481,9 +487,7 @@ class ProcessorModule:
                             f"주문번호: {order_number}, 상태: {order_status}")
                 logging.info(f"💰 예수금 변화: {self.deposit:,} → {prev_deposit:,}")
                 
-                # 이 부분 로직 설명()
-                if stock_code in self.trade_done : self.trade_done.remove(str(stock_code))
-                else :  self.holding_stock.append(str(stock_code))
+                self.holding_stock = await self.extract_stock_codes()
             
             # 2. 실제 체결된 경우만 수량 업데이트
             elif incremental_trade_qty > 0 and execution_price > 0:
@@ -521,9 +525,12 @@ class ProcessorModule:
                     # 체결 상태 로그
                     if (untrade_qty == 0 and trade_qty == order_qty) :
                         completion_status = "완료"
-                        # if stock_code not in self.holding_stock :
-                        #     self.holding_stock.append(str(stock_code)) 
- 
+                        if stock_code not in self.holding_stock:
+                            self.holding_stock.append(str(stock_code))
+                        
+                        if stock_code in self.order_execution_tracker:
+                            del self.order_execution_tracker[stock_code]
+                            logger.info(f"매수주문 완료에 따른 추적 데이터 정리: {stock_code}")                            
                     else : completion_status = "부분 체결"
                     
                     logging.info(f"💰 매수 체결 {completion_status} - 주문번호: {order_number}, 종목: {stock_code}")
@@ -550,6 +557,11 @@ class ProcessorModule:
                         completion_status = "완료"
                         if stock_code in self.holding_stock:
                             self.holding_stock.remove(str(stock_code))
+                        
+                        if stock_code in self.order_execution_tracker:
+                            del self.order_execution_tracker[stock_code]
+                            logger.info(f"매도주문 완료에 따른 추적 데이터 정리: {stock_code}")
+                        
                     else : completion_status = "부분 체결"
                     
                     logging.info(f"💰 매도 체결 {completion_status} - 주문번호: {order_number}, 종목: {stock_code}")
@@ -644,12 +656,12 @@ class ProcessorModule:
             # 🔧 수정: KOSPI 지수 (001)
             if item_code == '001' and self.kospi_index != change_rate:
                 self.kospi_index = change_rate
-                # logger.info(f"📈 KOSPI 지수 업데이트: 등락률 {change_rate}%")  
+                logger.debug(f"📈 KOSPI 지수 업데이트: 등락률 {change_rate}%")  
             
             # 🔧 수정: KOSDAQ 지수 (101)
             elif item_code == '101' and self.kosdaq_index != change_rate:
                 self.kosdaq_index = change_rate
-                # logger.info(f"📊 KOSDAQ 지수 업데이트: 등락률 {change_rate}%") 
+                logger.debug(f"📊 KOSDAQ 지수 업데이트: 등락률 {change_rate}%") 
 
                 
         except Exception as e:
@@ -680,25 +692,25 @@ class ProcessorModule:
 
             # 공통 시장 데이터 추출
             market_data = {
-                'stock_code': stock_code,
-                'current_price': abs(int(values.get('10', '0'))),
-                'open_price': abs(int(values.get('16', '0'))),
-                'high_price': abs(int(values.get('17', '0'))),
-                'low_price': abs(int(values.get('18', '0'))),
+                'stock_code'        : stock_code,
+                'current_price'     : abs(int(values.get('10', '0'))),
+                'open_price'        : abs(int(values.get('16', '0'))),
+                'high_price'        : abs(int(values.get('17', '0'))),
+                'low_price'         : abs(int(values.get('18', '0'))),
                 'execution_strength': float(values.get('228', '0')),
-                'timestamp': time.time()
-            }
+                'trade_volume'      : abs(int(values.get('13', '0'))),
+                'timestamp'         : time.time() }
 
             # 🔥 3. 시간대별 전략 분기
             current_state = self.determine_trading_state(now_time)
             
             # 상태별 전략 실행
-            if current_state == "OBSERVATION":       # 09:00-09:30
-                await self.observation_strategy(market_data)
-            elif current_state == "ACTIVE_TRADING":  # 09:30-12:00  
-                await self.active_trading_strategy(market_data)
-            elif current_state == "CONSERVATIVE":    # 12:00-15:30
-                await self.conservative_trading_strategy(market_data)
+            if current_state == "OPENING_SESSION":       # 09:00-10:00
+                await self.opening_strategy(market_data)
+            elif current_state == "MAIN_SESSION":  # 10:00-14:00  
+                await self.main_strategy(market_data)
+            elif current_state == "CLOSING_SESSION":    # 14:00-15:30
+                await self.closing_strategy(market_data)
             else:
                 # 거래시간 외에는 로그만 (필요시)
                 logger.debug(f"거래시간 외 데이터 수신: {stock_code} - {market_data['current_price']:,}원")
@@ -711,185 +723,135 @@ class ProcessorModule:
     def determine_trading_state(self, now_time):
         """현재 시간에 맞는 거래 상태 결정"""
         time_0900 = datetime_time(9, 0)
-        time_0930 = datetime_time(9, 30)
-        time_1200 = datetime_time(12, 0)
+        time_1000 = datetime_time(10, 0)
+        time_1400 = datetime_time(14, 0)
         time_1530 = datetime_time(15, 30)
         
-        if time_0900 <= now_time < time_0930:
-            return "OBSERVATION"      # 관망 시간
-        elif time_0930 <= now_time < time_1200:
-            return "ACTIVE_TRADING"   # 적극 매매
-        elif time_1200 <= now_time < time_1530:
-            return "CONSERVATIVE"     # 보수적 매매
+        if time_0900 <= now_time < time_1000:
+            return "OPENING_SESSION"      # 관망 시간
+        elif time_1000 <= now_time < time_1400:
+            return "MAIN_SESSION"   # 적극 매매
+        elif time_1400 <= now_time < time_1530:
+            return "CLOSING_SESSION"     # 보수적 매매
         else:
             return "INACTIVE"         # 거래시간 외
 
     # 🔥 1. 시간대별 전략 메서드 틀 (다음 단계에서 구현)
-    async def observation_strategy(self, market_data):
-        """09:00-09:30 관망 전략"""
+    # 09:00 - 10:00 관망 전략
+    async def opening_strategy(self, market_data):
         stock_code = market_data['stock_code']
-        current_price = market_data['current_price']
-        
-        logger.debug(f"👀 [관망시간] {stock_code} - 현재가: {current_price:,}원, 코스피: {self.kospi_index}%")
-        
+
         # 보유주식에 대한 기본 익절/손절만 실행
         if stock_code in self.holding_stock:
-            await self.basic_sell_logic(stock_code, market_data)
-        
-        await self.conservative_buy_logic(stock_code, market_data)
+            await self.opening_session_sell(market_data)
+        else :
+            await self.opening_session_buy(market_data)
 
-    async def active_trading_strategy(self, market_data):
-        """09:30-12:00 적극 매매 전략"""
+    # 10:00 - 14:00 적극 매매 전략
+    async def main_strategy(self, market_data):
         stock_code = market_data['stock_code']
-        
-        logger.debug(f"🚀 [적극매매] {stock_code} - 코스피: {self.kospi_index}%")
-        
-        if stock_code in self.holding_stock:
-            await self.active_sell_logic(stock_code, market_data)
-        else:
-            await self.active_buy_logic(stock_code, market_data)
 
-    async def conservative_trading_strategy(self, market_data):
-        """12:00-15:30 보수적 매매 전략"""
-        stock_code = market_data['stock_code']
-        
-        logger.debug(f"🛡️ [보수매매] {stock_code} - 코스피: {self.kospi_index}%")
-        
         if stock_code in self.holding_stock:
-            await self.conservative_sell_logic(stock_code, market_data)
+            await self.main_session_sell(market_data)
         else:
-            await self.conservative_buy_logic(stock_code, market_data)
-    
+            await self.main_session_buy(market_data)
+
+    # 14:00 - 15:30 보수적 매매 전략
+    async def closing_strategy(self, market_data):
+        stock_code = market_data['stock_code']
+
+        if stock_code in self.holding_stock:
+            await self.closing_session_sell(market_data)
+        else :
+            await self.closing_session_buy(market_data)
+
     # 🔥 매수가 계산 함수
-    def get_or_set_price_0930(self, stock_code, current_price):
-        if stock_code not in self.price_at_0930:
-            self.price_at_0930[stock_code] = current_price
-            logger.debug(f"📊 {stock_code} 09:30 기준가 설정: {current_price:,}원")
-        
-        return self.price_at_0930[stock_code]
       
-    def calculate_unified_buy_price(self, market_data, tracker_buy_price=0):
+    def calculate_unified_buy_price(self, market_data):
         """통합 매수가 계산 - 요구사항 완전 반영 버전"""
         
         stock_code = market_data['stock_code']
-        current_price = market_data['current_price']
-        open_price = market_data['open_price']
-        kospi_index = self.kospi_index
-        
-        # 09:30 기준가 사용 (없으면 현재가로 설정하고 저장)
-        price_0930 = self.get_or_set_price_0930(stock_code, current_price)
-        
-        if open_price <= 0:
-            logger.warning(f"{stock_code} 시가 정보 없음 - 09:30 기준가로 계산")
-            open_price = price_0930
-        
-        # 시가 대비 09:30 기준가 변동률 계산
-        price_change_rate = (price_0930 - open_price) / open_price
-        
-        # 기준가 선택 (시가와 09:30 기준가 중 작은 값)
-        reference_price = min(price_0930, open_price)
-        
-        calculated_price = 0
-        
-        # 코스피 지수별 매수 전략
-        if kospi_index >= 1.5:
-            # 코스피 +1.5% 이상 (강세장)
-            if abs(price_change_rate) <= 0.01:  # +/-1% 이내
-                calculated_price = int(reference_price * 0.985)  # -1.5%
-            elif price_change_rate > 0.01:  # +1% 이상 상승
-                # 시가 또는 09:30가 대비 -2.0% 중 큰 가격에서 매수
-                open_based = int(open_price * 0.98)
-                price_0930_based = int(price_0930 * 0.98)
-                calculated_price = max(open_based, price_0930_based)
-            else:  # -1% 이하 하락
-                # 09:30가 대비 -1.0% 또는 tracker_buy_price 중 작은 가격
-                price_0930_based = int(price_0930 * 0.99)
-                if tracker_buy_price > 0:
-                    calculated_price = min(price_0930_based, tracker_buy_price)
-                else:
-                    calculated_price = price_0930_based
-                    
-        elif kospi_index <= -1.5:
-            # 코스피 -1.5% 이하 (약세장)
-            if abs(price_change_rate) <= 0.01:  # +/-1% 이내
-                calculated_price = int(reference_price * 0.975)  # -2.5%
-            elif price_change_rate > 0.01:  # +1% 이상 상승
-                # 시가 또는 09:30가 대비 -2.0% 중 작은 가격
-                open_based = int(open_price * 0.98)
-                price_0930_based = int(price_0930 * 0.98)
-                calculated_price = min(open_based, price_0930_based)
-            else:  # -1% 이하 하락
-                # 시가 또는 09:30가 대비 -2.5% 중 작은 가격 또는 tracker_buy_price 중 최소값
-                open_based = int(open_price * 0.975)
-                price_0930_based = int(price_0930 * 0.975)
-                price_candidates = [open_based, price_0930_based]
-                if tracker_buy_price > 0:
-                    price_candidates.append(tracker_buy_price)
-                calculated_price = min(price_candidates)
-                
+
+        # 시장 지수 확인
+        if stock_code in KOSPI:
+            market_index = self.kospi_index
+            logger.debug(f"{stock_code} in Kospi -- index: {self.kospi_index}")
         else:
-            # 코스피 -1.5% ~ +1.5% (보통장)
-            if abs(price_change_rate) <= 0.01:  # +/-1% 이내
-                calculated_price = int(reference_price * 0.98)  # -2.0%
-            elif price_change_rate > 0.01:  # +1% 이상 상승
-                # 시가 또는 09:30가 대비 -2% 중 작은 가격
-                open_based = int(open_price * 0.98)
-                price_0930_based = int(price_0930 * 0.98)
-                calculated_price = min(open_based, price_0930_based)
-            else:  # -1% 이하 하락
-                # 09:30가 대비 -2% 또는 tracker_buy_price 중 작은 가격
-                price_0930_based = int(price_0930 * 0.98)
-                if tracker_buy_price > 0:
-                    calculated_price = min(price_0930_based, tracker_buy_price)
-                else:
-                    calculated_price = price_0930_based
+            market_index = self.kosdaq_index
+            logger.debug(f"{stock_code} in Kosdaq -- index: {self.kosdaq_index}")
         
-        # 최종 가격 결정
-        if tracker_buy_price > 0:
-            final_buy_price = min(calculated_price, tracker_buy_price)
+        # 장기거래 데이터에서 기본 가격 가져오기
+        if stock_code in self.long_trade_data:
+            original_buy_price = int(self.long_trade_data[stock_code]["buy_price"])
+            sell_price = int(self.long_trade_data[stock_code]["sell_price"])
         else:
-            final_buy_price = calculated_price
+            logger.warning(f"{stock_code} 장기거래 데이터가 없습니다.")
+            return 0  # 매수 불가
         
-        logger.debug(f"💰 {stock_code} 매수가 계산 [코스피: {kospi_index:.1f}%]")
-        logger.debug(f"   시가: {open_price:,}원, 09:30가: {price_0930:,}원 (변동: {price_change_rate:.2%})")
-        logger.debug(f"   계산가: {calculated_price:,}원, 추적가: {tracker_buy_price:,}원")
-        logger.debug(f"   → 최종: {final_buy_price:,}원")
+        # 기본 매수가 계산: (buy_price + sell_price) / 2
+        base_buy_price = (original_buy_price + sell_price) / 2
+        
+        # 시장 지수에 따른 조정
+        # market_index가 양수면 +, 음수면 - 적용
+        market_adjustment = (market_index ** 2) / 1000
+        if market_index >= 0:
+            adjusted_buy_price = base_buy_price * (1 + market_adjustment)
+        else:
+            adjusted_buy_price = base_buy_price * (1 - market_adjustment)
+        
+        final_buy_price = int(adjusted_buy_price)
+        
+        logger.debug(f"{stock_code} => 기본매수가: {base_buy_price:.0f}, "
+                    f"시장지수: {market_index}%, 조정매수가: {final_buy_price}")
         
         return final_buy_price
 
-    def should_sell_for_profit(self, stock_code, current_price, trade_price, high_price, kospi_index=None, time_period="NORMAL"):
-        """익절 조건 판단"""
+    async def should_sell_for_profit(self, stock_code, current_price, trade_price, execution_strength):
+        """익절 조건 판단 - 수정된 버전"""
         
         if trade_price <= 0:
             return False, "매수가 정보 없음"
         
-        # 수익률 계산
-        profit_rate = (current_price - trade_price) / trade_price
+        # 수익률 계산 (백분율)
+        profit = (current_price - trade_price) / trade_price * 100
         
-        # 시간대와 종목 타입에 따른 익절 기준 설정
+        # 종목 타입에 따른 익절 기준 설정
         is_long_term = stock_code in getattr(self, 'long_trade_code', [])
-        
-        if time_period == "OBSERVATION":  # 09:00-09:30
-            target_profit = 0.03 if is_long_term else 0.02
-        elif time_period == "ACTIVE_TRADING":  # 09:30-12:00
-            if kospi_index is not None and kospi_index >= -1.5:
-                target_profit = 0.03  # 코스피 -1.5% 이상일 때
-            else:
-                target_profit = 0.02  # 코스피 -1.5% 이하일 때
-        else:  # CONSERVATIVE (12:00-15:30)
-            target_profit = 0.02  # 고정 2%
+        target_profit = 3.0 if is_long_term else 2.0
         
         # 수익률 조건 확인
-        if profit_rate < target_profit:
-            return False, f"수익률 부족: {profit_rate:.2%} < {target_profit:.2%}"
+        if profit < target_profit:
+            return False, f"수익률 부족: {profit:.2f}% < {target_profit}%"
         
-        # 반전 조건 확인: 고점 대비 0.5% 이상 하락
-        if high_price > 0:
-            high_decline_rate = (high_price - current_price) / high_price
-            if high_decline_rate < 0.005:  # 0.5%
-                return False, f"반전 신호 부족: 고점 대비 {high_decline_rate:.2%} 하락"
+        # 수익률 조건을 만족하면 현재가로 추적 데이터 업데이트 (최고가/최저가 갱신)
+        tracking_data = await self.PT.update_tracking_data( stock_code    = stock_code, 
+                                                            current_price = current_price )
         
-        return True, f"익절 조건 만족: 수익률 {profit_rate:.2%}, 고점 대비 {high_decline_rate:.2%} 하락"
+        # 업데이트된 추적 데이터에서 최신 고점 가져오기
+        if not tracking_data:
+            return False, "추적 데이터 조회 실패"
+        
+        highest_price = tracking_data.get('highest_price', 0)
+        if highest_price <= 0:
+            return False, "고점 정보 없음"
+        
+        # 체결강도별 고점 대비 하락 기준
+        if execution_strength >= 120:
+            decline_threshold = 0.993  # 0.7% 하락
+        elif execution_strength >= 100:
+            decline_threshold = 0.995  # 0.5% 하락
+        elif execution_strength >= 80:
+            decline_threshold = 0.997  # 0.3% 하락
+        else:
+            decline_threshold = 0.998  # 0.2% 하락
+        
+        # 현재가가 고점 대비 기준치만큼 하락했는지 확인
+        if current_price <= highest_price * decline_threshold :
+            decline_rate = (highest_price - current_price) / highest_price * 100
+            return False, f"반전 신호 부족: 고점 대비 {decline_rate:.2f}% 하락 (기준: {(1-decline_threshold)*100:.1f}%)"
+        
+        decline_rate = (highest_price - current_price) / highest_price * 100
+        return True, f"익절 조건 만족: 수익률 {profit:.2f}%, 고점({highest_price:,}) 대비 {decline_rate:.2f}% 하락"
 
     def should_sell_for_loss(self, stock_code, current_price, trade_price):
         """손절 조건 판단"""
@@ -897,269 +859,334 @@ class ProcessorModule:
         if trade_price <= 0:
             return False, "매수가 정보 없음"
         
-        # 손실률 계산
-        loss_rate = (current_price - trade_price) / trade_price
+        # 손실률 계산 (백분율)
+        profit = (current_price - trade_price) / trade_price * 100
         
         # 종목 타입에 따른 손절 기준 설정
         is_long_term = stock_code in getattr(self, 'long_trade_code', [])
-        target_loss = -0.10 if is_long_term else -0.05  # 장기: -10%, 일반: -5%
+        target_loss = -10.0 if is_long_term else -5.0  # 장기: -10%, 일반: -5%
         
-        if loss_rate <= target_loss:
-            return True, f"손절 조건: {loss_rate:.2%} <= {target_loss:.2%}"
+        if profit <= target_loss:
+            return True, f"손절 조건: {profit:.2f}% <= {target_loss}%"
         
-        return False, f"손절 기준 미달: {loss_rate:.2%} > {target_loss:.2%}"
-
-    # 🔥 매도 로직들
-    async def basic_sell_logic(self, stock_code, market_data):
-        """기본 매도 로직 - 관망시간용"""
-        current_price = market_data['current_price']
-        high_price = market_data['high_price']
-        
-        try:
-            # 추적 데이터 조회
-            if not self.PT:
-                logger.error("PriceTracker가 초기화되지 않음")
-                return
-                
-            tracking_data = await self.PT.get_price_info(stock_code)
-            if not tracking_data:
-                logger.warning(f"⚠️ {stock_code} 추적 데이터 없음")
-                return
-            
-            trade_price = tracking_data.get('trade_price', 0)
-            qty_to_sell = tracking_data.get('qty_to_sell', 0)
-            
-            if trade_price <= 0 or qty_to_sell <= 0:
-                logger.warning(f"⚠️ {stock_code} 매도 불가 - 매수가: {trade_price}, 수량: {qty_to_sell}")
-                return
-            
-            # 익절 조건 확인
-            should_profit_sell, profit_reason = self.should_sell_for_profit(
-                stock_code, current_price, trade_price, high_price, 
-                kospi_index=self.kospi_index, time_period="OBSERVATION"
-            )
-            
-            if should_profit_sell:
-                logger.info(f"🎯 [관망-익절] {stock_code} 매도 시작 - {profit_reason}")
-                await self.execute_sell_order(stock_code, qty_to_sell, "익절매도")
-                return
-            
-            # 손절 조건 확인  
-            should_loss_sell, loss_reason = self.should_sell_for_loss(stock_code, current_price, trade_price)
-            
-            if should_loss_sell:
-                logger.warning(f"🛑 [관망-손절] {stock_code} 매도 시작 - {loss_reason}")
-                await self.execute_sell_order(stock_code, qty_to_sell, "손절매도")
-                return
-                
-        except Exception as e:
-            logger.error(f"❌ {stock_code} 기본 매도 로직 오류: {str(e)}")
-
-    async def active_sell_logic(self, stock_code, market_data):
-        """적극 매매 시간대 매도 로직"""
-        current_price = market_data['current_price']
-        high_price = market_data['high_price']
-        
-        try:
-            tracking_data = await self.PT.get_price_info(stock_code)
-            if not tracking_data:
-                logger.warning(f"⚠️ {stock_code} 추적 데이터 없음")
-                return
-            
-            trade_price = tracking_data.get('trade_price', 0)
-            qty_to_sell = tracking_data.get('qty_to_sell', 0)
-            
-            if trade_price <= 0 or qty_to_sell <= 0:
-                return
-            
-            # 익절 조건 확인 (코스피 지수 고려)
-            should_profit_sell, profit_reason = self.should_sell_for_profit(
-                stock_code, current_price, trade_price, high_price,
-                kospi_index=self.kospi_index, time_period="ACTIVE_TRADING"
-            )
-            
-            if should_profit_sell:
-                logger.info(f"🎯 [적극-익절] {stock_code} 매도 시작 - {profit_reason}")
-                await self.execute_sell_order(stock_code, qty_to_sell, "적극익절")
-                return
-            
-            # 손절 조건 확인
-            should_loss_sell, loss_reason = self.should_sell_for_loss(stock_code, current_price, trade_price)
-            
-            if should_loss_sell:
-                logger.warning(f"🛑 [적극-손절] {stock_code} 매도 시작 - {loss_reason}")
-                await self.execute_sell_order(stock_code, qty_to_sell, "적극손절")
-                return
-                
-        except Exception as e:
-            logger.error(f"❌ {stock_code} 적극 매도 로직 오류: {str(e)}")
-
-    async def conservative_sell_logic(self, stock_code, market_data):
-        """보수적 매매 시간대 매도 로직"""
-        current_price = market_data['current_price']
-        high_price = market_data['high_price']
-        
-        try:
-            if not self.PT:
-                return
-                
-            tracking_data = await self.PT.get_price_info(stock_code)
-            if not tracking_data:
-                logger.warning(f"⚠️ {stock_code} 추적 데이터 없음")
-                return
-            
-            trade_price = tracking_data.get('trade_price', 0)
-            qty_to_sell = tracking_data.get('qty_to_sell', 0)
-            
-            if trade_price <= 0 or qty_to_sell <= 0:
-                return
-            
-            # 익절 조건 확인 (보수적: 고정 2%)
-            should_profit_sell, profit_reason = self.should_sell_for_profit(
-                stock_code, current_price, trade_price, high_price,
-                time_period="CONSERVATIVE"
-            )
-            
-            if should_profit_sell:
-                logger.info(f"🎯 [보수-익절] {stock_code} 매도 시작 - {profit_reason}")
-                await self.execute_sell_order(stock_code, qty_to_sell, "보수익절")
-                return
-            
-            # 손절 조건 확인
-            should_loss_sell, loss_reason = self.should_sell_for_loss(stock_code, current_price, trade_price)
-            
-            if should_loss_sell:
-                logger.warning(f"🛑 [보수-손절] {stock_code} 매도 시작 - {loss_reason}")
-                await self.execute_sell_order(stock_code, qty_to_sell, "보수손절")
-                return
-                
-        except Exception as e:
-            logger.error(f"❌ {stock_code} 보수 매도 로직 오류: {str(e)}")
+        return False, f"손절 기준 미달: {profit:.2f}% > {target_loss}%"
 
     # 🔥 매수 로직들
-    async def emergency_buy_logic(self, stock_code, market_data):
-        """긴급 매수 로직 - 코스피 -3% 이상 하락시"""
-        current_price = market_data['current_price']
+    async def opening_session_buy(self, market_data):
+        """09:00-10:00 관망 시간 매수 로직"""
         
-        try:
-            # long_trade_data에서 매수 정보 조회
-            trade_info = self.long_trade_data.get(stock_code, {})
-            if not trade_info:
-                return
-                
-            target_buy_price = trade_info.get('buy_price', 0)
-            target_buy_qty = trade_info.get('buy_qty', 0)
-            
-            if target_buy_price <= 0 or target_buy_qty <= 0:
-                logger.warning(f"⚠️ {stock_code} 긴급 매수 데이터 부족 - 가격: {target_buy_price}, 수량: {target_buy_qty}")
-                return
-            
-            # 목표가 이하에서 매수
-            if current_price <= target_buy_price and stock_code not in self.trade_done:
-                logger.warning(f"🚨 [긴급매수] {stock_code} - 코스피: {self.kospi_index}%, 현재가: {current_price:,}원 <= 목표: {target_buy_price:,}원")
-                
-                self.trade_done.append(stock_code)
-                await self.execute_buy_order(stock_code, target_buy_qty, target_buy_price, "긴급매수")
-                
-        except Exception as e:
-            logger.error(f"❌ {stock_code} 긴급 매수 로직 오류: {str(e)}")
-
-    async def active_buy_logic(self, stock_code, market_data):
-        """적극 매매 시간대 매수 로직"""
-        current_price = market_data['current_price']
+        stock_code = market_data['stock_code']
         open_price = market_data['open_price']
-        low_price = market_data['low_price']
+        current_price = market_data['current_price']
+        trade_volume = market_data['trade_volume']
+        execution_strength = market_data['execution_strength']
         
-        try:
-            # 코스피 -3% 이하면 매수 금지
-            if self.kospi_index <= -3.0:
-                logger.debug(f"📵 [매수금지] {stock_code} - 코스피 {self.kospi_index}% <= -3%")
-                return
+        # 이미 보유 중인 주식은 매수 불가
+        if stock_code in self.holding_stock:
+            return
+        
+        # 매수가 계산
+        buy_price = self.calculate_unified_buy_price(market_data)
+        if buy_price <= 0:
+            return
+        
+        # 시장 지수 확인
+        market_index = self.kospi_index if stock_code in KOSPI else self.kosdaq_index
+        
+        # 기본 조건 확인
+        if trade_volume < 1000:
+            logger.debug(f"📊 {stock_code} 매수 보류 - 거래량 부족: {trade_volume}")
+            return
+        
+        if market_index < -3.0:
+            logger.debug(f"📊 {stock_code} 매수 보류 - 시장 지수 하락: {market_index}%")
+            return
+        
+        # 가격 조건 확인
+        if current_price > buy_price:
+            logger.debug(f"📊 {stock_code} 매수 조건 미달 - 현재가: {current_price:,} > 매수가: {buy_price:,}")
+            return
+          
+        if stock_code in self.holding_stock :
+            logger.debug(f"{stock_code} 보유지식 재매입 금지")
             
-            # 장기거래 종목이 아니면 매수 안함
-            if stock_code not in self.long_trade_code:
-                return
-                
-            # 이미 거래 완료된 종목은 제외
-            if stock_code in self.trade_done:
-                return
-            
-            if not self.PT:
-                return
-                
-            # 추적 데이터에서 매수 수량 조회
-            tracking_data = await self.PT.get_price_info(stock_code)
-            if not tracking_data:
-                return
-                
-            target_buy_qty = tracking_data.get('qty_to_buy', 0)
-            tracker_buy_price = tracking_data.get('price_to_buy', 0)
-            
-            if target_buy_qty <= 0:
-                logger.warning(f"⚠️ {stock_code} 매수 수량 없음: {target_buy_qty}")
-                return
-            
-            # 통합 매수가 계산
-            calculated_buy_price = self.calculate_unified_buy_price(market_data, tracker_buy_price)
-            
-            # 매수 조건 확인: 현재가가 계산된 매수가 이하
-            if current_price <= calculated_buy_price:
-                # 추가 안전장치: 저점 대비 너무 높지 않은지 확인 (저점 대비 +2% 이내)
-                if low_price > 0 and current_price <= low_price * 1.02:
-                    logger.info(f"🛒 [적극매수] {stock_code} - 현재가: {current_price:,}원 <= 목표: {calculated_buy_price:,}원")
-                    logger.info(f"    코스피: {self.kospi_index}%, 시가: {open_price:,}원, 저가: {low_price:,}원")
-                    
-                    self.trade_done.append(stock_code)
-                    await self.execute_buy_order(stock_code, target_buy_qty, calculated_buy_price, "적극매수")
-                else:
-                    logger.debug(f"🚫 [매수보류] {stock_code} - 저점 대비 상승폭 과다: {current_price:,}원 vs 저가 {low_price:,}원")
+        tracking_data = await self.PT.update_tracking_data(
+                        stock_code=stock_code,
+                        current_price=current_price)    
+        
+        lowest_price = tracking_data.get('lowest_price', 0)
+        # 체결강도별 세부 조건
+        should_buy = False
+        reason = ""
+        
+        if execution_strength > 120 and current_price > open_price:
+            should_buy = True
+            reason = f"체결강도 {execution_strength} > 120"
+        elif execution_strength > 100:
+            if current_price > lowest_price * 1.003:
+                should_buy = True
+                reason = f"체결강도 {execution_strength}, 저점 대비 0.3% 상승"
+        elif execution_strength > 80:
+            if current_price > lowest_price * 1.005:
+                should_buy = True
+                reason = f"체결강도 {execution_strength}, 저점 대비 0.5% 상승"
+        else:  # execution_strength <= 80
+            if current_price > lowest_price * 1.007:
+                should_buy = True
+                reason = f"체결강도 {execution_strength}, 저점 대비 0.7% 상승"
+        
+        if should_buy:
+            # 매수 수량 계산
+            if stock_code in self.long_trade_data:
+                buy_qty = self.long_trade_data[stock_code].get('buy_qty', 1)
             else:
-                logger.debug(f"💰 [매수대기] {stock_code} - 현재가: {current_price:,}원 > 목표: {calculated_buy_price:,}원")
-                
-        except Exception as e:
-            logger.error(f"❌ {stock_code} 적극 매수 로직 오류: {str(e)}")
+                buy_qty = max(int(self.assigned_per_stock / current_price), 1)
+            
+            logger.info(f"💰 [관망매수] {stock_code} 매수 조건 만족 - {reason}")
+            await self.execute_buy_order(stock_code, buy_qty, buy_price, "관망매수")
+            
+            # 매수 완료 처리
+            if stock_code not in self.trade_done:
+                self.trade_done.append(stock_code)
+        else:
+            logger.debug(f"📊 {stock_code} 매수 조건 미달 - 체결강도: {execution_strength}")
 
-    async def conservative_buy_logic(self, stock_code, market_data):
-        """보수적 매매 시간대 매수 로직"""
+    async def main_session_buy(self, market_data):
+        """10:00-14:00 적극 매매 시간 매수 로직"""
+        
+        stock_code = market_data['stock_code']
         current_price = market_data['current_price']
         
-        try:
-            # 장기거래 종목이 아니면 매수 안함
-            if stock_code not in self.long_trade_code:
-                return
-                
-            if self.kospi_index <= -3.0 :
-                logger.debug(f"📵 [매수금지] {stock_code} - 코스피 {self.kospi_index}% <= -3%")
-                return
-              
-            # 이미 거래 완료된 종목은 제외
-            if stock_code in self.trade_done:
-                return
+        # 이미 보유 중인 주식은 매수 불가
+        if stock_code in self.holding_stock:
+            return
+        
+        # 매수가 계산
+        buy_price = self.calculate_unified_buy_price(market_data)
+        if buy_price <= 0:
+            return
             
-            # 추적 데이터에서 매수 정보 조회
-            tracking_data = await self.PT.get_price_info(stock_code)
-            if not tracking_data:
-                return
-                
-            target_buy_qty = tracking_data.get('qty_to_buy', 0)
-            tracker_buy_price = tracking_data.get('price_to_buy', 0)  # price_tracker의 buy_price 사용
-            
-            if target_buy_qty <= 0 or tracker_buy_price <= 0:
-                logger.warning(f"⚠️ {stock_code} 보수 매수 데이터 부족 - 수량: {target_buy_qty}, 가격: {tracker_buy_price}")
-                return
-            
-            # 보수적 매수: tracker_buy_price 이하에서만 매수
-            if current_price <= tracker_buy_price:
-                logger.info(f"🛡️ [보수매수] {stock_code} - 현재가: {current_price:,}원 <= 목표: {tracker_buy_price:,}원")
-                
-                self.trade_done.append(stock_code)
-                await self.execute_buy_order(stock_code, target_buy_qty, tracker_buy_price, "보수매수")
+        # 기본 가격 조건
+        if current_price > buy_price:
+            return
+        
+        # 현재가로 추적 데이터 업데이트
+        tracking_data = await self.PT.update_tracking_data(
+                        stock_code=stock_code,
+                        current_price=current_price)
+        
+        # 추적 데이터에서 저점 가져오기
+        if not tracking_data:
+            logger.warning(f"⚠️ {stock_code} 추적 데이터가 없습니다.")
+            return
+        
+        lowest_price = tracking_data.get('lowest_price', 0)
+        if lowest_price <= 0:
+            logger.debug(f"📊 {stock_code} 저점 정보 없음")
+            return
+        
+        # 저점 대비 0.5% 상승 조건
+        if current_price > lowest_price * 1.005:
+            # 매수 수량 계산
+            if stock_code in self.long_trade_data:
+                buy_qty = self.long_trade_data[stock_code].get('buy_qty', 1)
             else:
-                logger.debug(f"💰 [보수대기] {stock_code} - 현재가: {current_price:,}원 > 목표: {tracker_buy_price:,}원")
-                
-        except Exception as e:
-            logger.error(f"❌ {stock_code} 보수 매수 로직 오류: {str(e)}")
+                buy_qty = max(int(self.assigned_per_stock / current_price), 1)
+            
+            logger.info(f"🚀 [적극매수] {stock_code} 매수 실행 - 저점({lowest_price:,}) 대비 0.5% 상승")
+            await self.execute_buy_order(stock_code, buy_qty, buy_price, "적극매수")
+            
+            # 매수 완료 처리
+            if stock_code not in self.trade_done:
+                self.trade_done.append(stock_code)
+        else:
+            logger.debug(f"📊 {stock_code} 매수 보류 - 저점 대비 상승률 부족")
 
+    async def closing_session_buy(self, market_data):
+        """14:00-15:30 보수적 매매 시간 매수 로직"""
+        
+        stock_code = market_data['stock_code']
+        current_price = market_data['current_price']
+        
+        # 이미 보유 중인 주식은 매수 불가
+        if stock_code in self.holding_stock:
+            return
+        
+        # 매수가 계산
+        buy_price = self.calculate_unified_buy_price(market_data)
+        if buy_price <= 0:
+            return
+        
+        # 기본 가격 조건
+        if current_price > buy_price:
+            return
+        
+        # 현재가로 추적 데이터 업데이트
+        tracking_data = await self.PT.update_tracking_data(
+                              stock_code=stock_code,
+                              current_price=current_price )
+        
+        # 추적 데이터에서 저점 가져오기
+        if not tracking_data:
+            logger.warning(f"⚠️ {stock_code} 추적 데이터가 없습니다.")
+            return
+        
+        lowest_price = tracking_data.get('lowest_price', 0)
+        if lowest_price <= 0:
+            logger.debug(f"📊 {stock_code} 저점 정보 없음")
+            return
+        
+        # 저점 대비 0.5% 상승 조건 (main_session과 동일)
+        if current_price > lowest_price * 1.005:
+            # 매수 수량 계산
+            if stock_code in self.long_trade_data:
+                buy_qty = self.long_trade_data[stock_code].get('buy_qty', 1)
+            else:
+                buy_qty = max(int(self.assigned_per_stock / current_price), 1)
+            
+            logger.info(f"🛡️ [보수매수] {stock_code} 매수 실행 - 저점({lowest_price:,}) 대비 0.5% 상승")
+            await self.execute_buy_order(stock_code, buy_qty, buy_price, "보수매수")
+            
+            # 매수 완료 처리
+            if stock_code not in self.trade_done:
+                self.trade_done.append(stock_code)
+        else:
+            logger.debug(f"📊 {stock_code} 매수 보류 - 저점 대비 상승률 부족")
+
+    # 🔥 매도 로직들
+    async def opening_session_sell(self, market_data):
+        """09:00-10:00 관망 시간 매도 로직"""
+        
+        stock_code = market_data['stock_code']
+        current_price = market_data['current_price']
+        execution_strength = market_data['execution_strength']
+        
+        # 보유하지 않은 주식은 매도 불가
+        if stock_code not in self.holding_stock:
+            return
+        
+        # 추적 데이터에서 매수가 가져오기
+        tracking_data = await self.PT.get_price_info(stock_code)
+        if not tracking_data:
+            logger.warning(f"⚠️ {stock_code} 추적 데이터가 없습니다.")
+            return
+        
+        trade_price = tracking_data.get('trade_price', 0)
+        if trade_price <= 0:
+            logger.warning(f"⚠️ {stock_code} 매수가 정보가 없습니다.")
+            return
+        
+        # 보유 수량 확인
+        qty_to_sell = tracking_data.get('qty_to_sell', 0)
+        
+        if qty_to_sell <= 0:
+            logger.warning(f"⚠️ {stock_code} 매도 가능 수량이 없습니다.")
+            return
+        
+        # 익절 조건 확인
+        should_profit_sell, profit_reason = await self.should_sell_for_profit(
+            stock_code, current_price, trade_price, execution_strength )
+        
+        # 손절 조건 확인
+        should_loss_sell, loss_reason = self.should_sell_for_loss(
+            stock_code, current_price, trade_price )
+        
+        if should_profit_sell:
+            logger.info(f"💰 [관망익절] {stock_code} 익절 매도 - {profit_reason}")
+            await self.execute_sell_order(stock_code, qty_to_sell, "관망익절")
+            
+        elif should_loss_sell:
+            logger.info(f"🚨 [관망손절] {stock_code} 손절 매도 - {loss_reason}")
+            await self.execute_sell_order(stock_code, qty_to_sell, "관망손절")
+
+    async def main_session_sell(self, market_data):
+        """10:00-14:00 적극 매매 시간 매도 로직"""
+        
+        stock_code = market_data['stock_code']
+        current_price = market_data['current_price']
+        execution_strength = market_data['execution_strength']
+        
+        # 보유하지 않은 주식은 매도 불가
+        if stock_code not in self.holding_stock:
+            return
+        
+        # 추적 데이터에서 매수가 가져오기
+        tracking_data = await self.PT.get_price_info(stock_code)
+        if not tracking_data:
+            logger.warning(f"⚠️ {stock_code} 추적 데이터가 없습니다.")
+            return
+        
+        trade_price = tracking_data.get('trade_price', 0)
+        if trade_price <= 0:
+            logger.warning(f"⚠️ {stock_code} 매수가 정보가 없습니다.")
+            return
+        
+        # 보유 수량 확인
+        qty_to_sell = tracking_data.get('qty_to_sell', 0)
+        if qty_to_sell <= 0:
+            logger.warning(f"⚠️ {stock_code} 매도 가능 수량이 없습니다.")
+            return
+        
+        # 익절 조건 확인
+        should_profit_sell, profit_reason = await self.should_sell_for_profit(
+            stock_code, current_price, trade_price, execution_strength )
+        
+        # 손절 조건 확인
+        should_loss_sell, loss_reason = self.should_sell_for_loss(
+            stock_code, current_price, trade_price )
+        
+        if should_profit_sell:
+            logger.info(f"🚀 [적극익절] {stock_code} 익절 매도 - {profit_reason}")
+            await self.execute_sell_order(stock_code, qty_to_sell, "적극익절")
+        elif should_loss_sell:
+            logger.info(f"🚨 [적극손절] {stock_code} 손절 매도 - {loss_reason}")
+            await self.execute_sell_order(stock_code, qty_to_sell, "적극손절")
+
+    async def closing_session_sell(self, market_data):
+        """14:00-15:30 보수적 매매 시간 매도 로직"""
+        
+        stock_code = market_data['stock_code']
+        current_price = market_data['current_price']
+        execution_strength = market_data['execution_strength']
+        
+        # 보유하지 않은 주식은 매도 불가
+        if stock_code not in self.holding_stock:
+            return
+        
+        # 추적 데이터에서 매수가 가져오기
+        tracking_data = await self.PT.get_price_info(stock_code)
+        if not tracking_data:
+            logger.warning(f"⚠️ {stock_code} 추적 데이터가 없습니다.")
+            return
+        
+        trade_price = tracking_data.get('trade_price', 0)
+        if trade_price <= 0:
+            logger.warning(f"⚠️ {stock_code} 매수가 정보가 없습니다.")
+            return
+        
+        # 보유 수량 확인
+        qty_to_sell = tracking_data.get('qty_to_sell', 0)
+        if qty_to_sell <= 0:
+            logger.warning(f"⚠️ {stock_code} 매도 가능 수량이 없습니다.")
+            return
+        
+        # 익절 조건 확인
+        should_profit_sell, profit_reason = await self.should_sell_for_profit(
+            stock_code, current_price, trade_price, execution_strength
+        )
+        
+        # 손절 조건 확인
+        should_loss_sell, loss_reason = self.should_sell_for_loss(
+            stock_code, current_price, trade_price
+        )
+        
+        if should_profit_sell:
+            logger.info(f"🛡️ [보수익절] {stock_code} 익절 매도 - {profit_reason}")
+            await self.execute_sell_order(stock_code, qty_to_sell, "보수익절")
+        elif should_loss_sell:
+            logger.info(f"🚨 [보수손절] {stock_code} 손절 매도 - {loss_reason}")
+            await self.execute_sell_order(stock_code, qty_to_sell, "보수손절")
+        
     # 🔥 주문 실행 함수들
     async def execute_sell_order(self, stock_code, qty, order_type="매도"):
         """매도 주문 실행"""
@@ -1194,6 +1221,9 @@ class ProcessorModule:
             if not self.kiwoom_module:
                 logger.error("Kiwoom 모듈이 초기화되지 않음")
                 return
+              
+            if stock_code not in self.holding_stock:
+                self.holding_stock.append(stock_code)
                 
             await self.kiwoom_module.order_stock_buy(
                 dmst_stex_tp="KRX", 
@@ -1253,7 +1283,7 @@ class ProcessorModule:
                     base_df = await self.LTH.daily_chart_to_df(stock_code)
                     odf = self.LTH.process_daychart_df(base_df)
                     dec_price5, dec_price10,dec_price20, = self.LTH.price_expectation(odf)
-                    logger.info(f"주식 {stock_code} : {dec_price5},{dec_price10},{dec_price20}")
+                    logger.debug(f"주식 {stock_code} : {dec_price5},{dec_price10},{dec_price20}")
                     df = odf.head(20)
 
                     current_price = int(odf.iloc[0]["close"])
@@ -1274,11 +1304,11 @@ class ProcessorModule:
                         step = 'ma20'
                     avg_slope = self.LTH.average_slope(df)
                     buy_qty   = max(int(self.assigned_per_stock / current_price * 1.1), 1)
+                    
                     # 매수 가능한 주식만 선별해서 trade_group에 추가
                     if  avg_slope['avg_ma20_slope'] >= 0.1 and odf.iloc[0]["ma20_slope"] >= 0.1 :
                         stock_qty += 1
-                        trade_group.append(stock_code)
-                        logger.info(f"{stock_code} - 현재가 :{current_price}, 매수 목표가 :{buy_price}, 매도 목표가 :{sell_price} ")
+                        logger.info(f"{stock_qty}번째 거래가능 주식 : {stock_code} - 현재가 :{current_price}, 매수 목표가 :{buy_price}, 매도 목표가 :{sell_price} ")
                         long_trade_code[stock_code] = { 'current_price' : current_price,
                                                         'step'          : step,
                                                         'buy_price'     : buy_price,
@@ -1293,9 +1323,9 @@ class ProcessorModule:
             self.save_long_trade_code(long_trade_code)
             await asyncio.sleep(1) # 저장시간 보장을 위해 1초 기다림
             self.load_long_trade_data = self.load_long_trade_code()
-            self.trade_group = trade_group
+            self.trade_group = list(self.load_long_trade_data.keys())
             
-            logger.info(f"🎯 장기거래 가능 : {stock_qty}개 종목")
+            logger.info(f"🎯 장기거래 가능 : {stock_qty} 개 종목 거래 시작")
 
 
         except Exception as e:
@@ -1309,6 +1339,7 @@ class ProcessorModule:
     # =================================================================
     # 하루에 한 번만 실행하는 작업들
     # =================================================================
+
     async def time_handler(self):
         last_run = {}
         daily_trading_check = {}  # 일일 거래일 체크 결과 저장
@@ -1343,8 +1374,8 @@ class ProcessorModule:
                 
                 time_0830 = datetime_time(8, 30)
                 time_0900 = datetime_time(9, 0)
-                time_0930 = datetime_time(9, 30)
-                time_1200 = datetime_time(12, 0)
+                time_1000 = datetime_time(10, 0)
+                time_1400 = datetime_time(14, 0)
                 time_1530 = datetime_time(15, 30)
                 
                 # 다음 작업까지의 대기 시간 계산
@@ -1352,10 +1383,12 @@ class ProcessorModule:
                 
                 # 08:30-09:00 - 장기거래 코드 로딩
                 if time_0830 <= now_time < time_0900:
-                    if last_run.get('long_trading') != today:
+                    if last_run.get('before_market') != today:
                         logger.info("🌅 [08:30-09:00] 장기거래 코드 로딩")
-                        await self.prepare_daily_trading()
-                        last_run['long_trading'] = today
+                        await self.market_code_saver()
+                        await self.setup_opening_trading()
+                        
+                        last_run['before_market'] = today
                     else:
                         # 09:00까지 남은 시간
                         try:
@@ -1364,43 +1397,46 @@ class ProcessorModule:
                         except Exception:
                             sleep_time = 300
 
-                # 09:00-09:30 - 조건검색 및 거래 준비
-                elif time_0900 <= now_time < time_0930:
-                    if last_run.get('condition_search') != today:
-                        logger.info("📋 [09:00-09:30] 조건검색 및 거래 준비")
+                # 09:00-10:00 - 조건검색 및 거래 준비
+                elif time_0900 <= now_time < time_1000:
+                    if last_run.get('opening_session') != today:
+                        logger.info("📋 [09:00-10:00] 오전 거래 설정")
+                        await self.start_trading()
                         # 필요한 TODO 함수 로직 : 현재는 없음
-                        last_run['condition_search'] = today
+                        last_run['opening_session'] = today
                     else:
                         try:
-                            target = kst.localize(datetime.combine(today, time_0930))
+                            target = kst.localize(datetime.combine(today, time_1000))
                             sleep_time = max((target - now).total_seconds(), 60)
                         except Exception:
                             sleep_time = 300
                             
-                elif time_0930 <= now_time < time_1200:
-                    if last_run.get('condition_search') != today:
-                        logger.info("📋 [09:30-12:00] 조건검색 및 거래 준비")
-                        await self.setup_morning_trading()
-                        last_run['condition_search'] = today
+                # 10:00-14:00 - 메인 거래 시간
+                elif time_1000 <= now_time < time_1400:
+                    if last_run.get('main_session') != today:
+                        logger.info("🚀 [10:00-14:00] 메인 거래 설정")
+                        await self.setup_main_trading()
+                        last_run['main_session'] = today
                     else:
                         try:
-                            target = kst.localize(datetime.combine(today, time_1200))
+                            target = kst.localize(datetime.combine(today, time_1400))
                             sleep_time = max((target - now).total_seconds(), 300)
                         except Exception:
                             sleep_time = 600
                             
-                elif time_1200 <= now_time < time_1530:
-                    if last_run.get('condition_search') != today:
-                        logger.info("📋 [12:00-15:30] 조건검색 및 거래 준비")
-                        await self.setup_afternoon_trading()
-                        last_run['condition_search'] = today
+                # 14:00-15:30 - 장마감 거래 준비
+                elif time_1400 <= now_time < time_1530:
+                    if last_run.get('closing_session') != today:
+                        logger.info("🔚 [14:00-15:30] 장마감 거래 준비")
+                        await self.setup_closing_trading()
+                        last_run['closing_session'] = today
                     else:
                         try:
                             target = kst.localize(datetime.combine(today, time_1530))
                             sleep_time = max((target - now).total_seconds(), 300)
                         except Exception:
                             sleep_time = 600
-                            
+                          
                 # 15:30 이후 - 장마감 후 처리
                 elif now_time >= time_1530:
                     if last_run.get('post_market') != today:
@@ -1453,10 +1489,8 @@ class ProcessorModule:
     # =================================================================
     # 시간대별 전략 메서드들 (실시간 실행)
     # =================================================================
-    # 0830 ~ 0900 로직
-    async def prepare_daily_trading(self):
-        """일일 거래 준비 - 09:00-09:30"""
-        logger.info("일일 거래 준비 시작")
+    async def start_trading(self):
+        logger.info("거래 준비 시작")
         
         # 현재 보유중인 주식 코드 추출
         self.holding_stock = await self.extract_stock_codes()
@@ -1506,8 +1540,13 @@ class ProcessorModule:
         
         # 트래커 초기화 및 업데이트
         try:
+            # 전체 코드 초기화
             await self.initialize_tracker(self.trade_group)
+            
+            # 장기거래 목록 업데이트
             await self.update_long_trade()
+            
+            # 보유 주식 업데이트
             await self.update_holding_stock()
             logger.info("트래커 초기화 및 업데이트 완료")
         except Exception as e:
@@ -1517,23 +1556,31 @@ class ProcessorModule:
         
         logger.info("일일 거래 준비 완료")
 
-    # 0930 ~ 1200
-    async def setup_morning_trading(self):
+
+    # 0900 ~ 1000 로직
+    async def setup_opening_trading(self):
         """오전 거래 설정"""
         logger.info("🌅 오전 거래 모드 설정")
         await self.long_trading_handler()
         await asyncio.sleep(1)
-        await self.prepare_daily_trading()
+        await self.start_trading()
+        
+    # 1000 ~ 1400
+    async def setup_main_trading(self):
+        """메인 거래 설정"""
+        logger.info("🌅 메인 거래 모드 설정")
+        await self.long_trading_handler()
+        await asyncio.sleep(1)
+        await self.start_trading()
         # 오전 거래 특별 설정이 있다면 여기에
 
     # 1200 ~ 1530
-    async def setup_afternoon_trading(self):
+    async def setup_closing_trading(self):
         """오후 거래 설정"""
         logger.info("🌆 오후 거래 모드 설정")
-
         await self.long_trading_handler()
         await asyncio.sleep(1)
-        await self.prepare_daily_trading()        
+        await self.start_trading()        
         # 오후 거래 특별 설정이 있다면 여기에
 
     # =================================================================
@@ -1940,3 +1987,53 @@ class ProcessorModule:
         
         return stock_codes
 
+    async def market_code_saver(self):
+        await self.realtime_module.get_condition_list()
+        KOSPI = await self.request_condition_search_all(2)
+        KOSDAQ = await self.request_condition_search_all(3)
+        logger.info(f"코스피 갯수 :  {len(KOSPI)}")
+        logger.info(f"코스닥 갯수 :  {len(KOSDAQ)}")
+        
+        os.makedirs("data", exist_ok=True)  # data 폴더 없으면 생성
+        with open("data/market_code.py", "w", encoding="utf-8") as f:
+            f.write("KOSPI = " + self.format_list(KOSPI, 10) + "\n")
+            f.write("KOSDAQ = " + self.format_list(KOSDAQ, 10) + "\n")
+        
+    async def request_condition_search_all(self, seq: str = "2") -> list:
+        """조건 검색 결과를 모두 가져와서 종목 코드 리스트로 반환"""
+        codes = []
+
+        # 첫 요청
+        res = await self.realtime_module.request_condition_search(seq=seq)
+        codes.extend(self.cond_to_list(res))
+
+        # next_key가 있는 동안 반복 요청
+        next_key = res.get("next_key")
+        while next_key:
+            await asyncio.sleep(0.3)
+            res = await self.realtime_module.request_condition_search(
+                seq=seq,
+                cont_yn="Y",
+                next_key=next_key
+            )
+            codes.extend(self.cond_to_list(res))
+            next_key = res.get("next_key")
+
+        return codes
+
+    def format_list(self, data_list, chunk_size=10):
+        """리스트를 chunk_size 단위로 줄바꿈해서 포맷팅"""
+        if not data_list:
+            return "[]"
+        
+        result = "[\n"
+        for i in range(0, len(data_list), chunk_size):
+            chunk = data_list[i:i+chunk_size]
+            chunk_str = ", ".join(repr(item) for item in chunk)
+            result += "    " + chunk_str
+            if i + chunk_size < len(data_list):
+                result += ",\n"
+            else:
+                result += "\n"
+        result += "]"
+        return result

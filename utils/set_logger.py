@@ -11,7 +11,7 @@ class SetLogger:
                   log_dir: str = "logs",
                   file_prefix: str = "new_trading",
                   file_level: int = logging.INFO,
-                  console_level: int = logging.DEBUG,
+                  console_level: int = logging.INFO,
                   logger_level: int = logging.DEBUG):
         """
         Args:
@@ -99,11 +99,11 @@ class SetLogger:
         return logger_setup.initialize()
     
     @classmethod
-    def create_custom_logger(cls, 
-                           log_dir: str = "logs",
-                           file_prefix: str = "app",
-                           file_level: int = logging.INFO,
-                           console_level: int = logging.DEBUG) -> logging.Logger:
+    def create_custom_logger( cls, 
+                              log_dir: str = "logs",
+                              file_prefix: str = "app",
+                              file_level: int = logging.INFO,
+                              console_level: int = logging.DEBUG) -> logging.Logger:
         """커스텀 설정으로 로거 생성 (편의 메서드)"""
         logger_setup = cls(
             log_dir=log_dir,

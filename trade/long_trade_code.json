@@ -1,331 +1,387 @@
 {
-  "300720": {
-    "current_price": 21100,
-    "step": "ma20",
-    "buy_price": 19650,
-    "buy_qty": 112,
-    "sell_price": 21615
-  },
-  "036560": {
-    "current_price": 14870,
-    "step": "ma20",
-    "buy_price": 13596,
-    "buy_qty": 159,
-    "sell_price": 14955
-  },
-  "065680": {
-    "current_price": 42250,
-    "step": "ma20",
-    "buy_price": 42680,
-    "buy_qty": 56,
-    "sell_price": 46948
-  },
-  "003300": {
-    "current_price": 19220,
-    "step": "ma20",
-    "buy_price": 18555,
-    "buy_qty": 123,
-    "sell_price": 20410
-  },
-  "101490": {
-    "current_price": 50700,
-    "step": "ma20",
-    "buy_price": 49058,
-    "buy_qty": 46,
-    "sell_price": 53963
-  },
-  "036890": {
-    "current_price": 12550,
-    "step": "ma20",
-    "buy_price": 11696,
-    "buy_qty": 188,
-    "sell_price": 12865
-  },
-  "278470": {
-    "current_price": 230000,
-    "step": "ma5",
-    "buy_price": 204780,
-    "buy_qty": 10,
-    "sell_price": 241500
-  },
-  "005070": {
-    "current_price": 41500,
-    "step": "ma20",
-    "buy_price": 38572,
-    "buy_qty": 57,
-    "sell_price": 42429
-  },
-  "119610": {
-    "current_price": 19020,
-    "step": "ma20",
-    "buy_price": 19692,
-    "buy_qty": 124,
-    "sell_price": 21661
-  },
-  "044490": {
-    "current_price": 40300,
-    "step": "ma20",
-    "buy_price": 38175,
-    "buy_qty": 58,
-    "sell_price": 41992
-  },
-  "036830": {
-    "current_price": 44950,
-    "step": "ma20",
-    "buy_price": 43122,
-    "buy_qty": 52,
-    "sell_price": 47434
-  },
-  "005930": {
-    "current_price": 71800,
-    "step": "ma20",
-    "buy_price": 68070,
-    "buy_qty": 32,
-    "sell_price": 74877
-  },
-  "108380": {
-    "current_price": 27850,
-    "step": "ma20",
-    "buy_price": 25368,
-    "buy_qty": 85,
-    "sell_price": 27904
-  },
-  "043150": {
-    "current_price": 24000,
-    "step": "ma20",
-    "buy_price": 22912,
-    "buy_qty": 98,
-    "sell_price": 25203
-  },
-  "071970": {
-    "current_price": 83100,
-    "step": "ma5",
-    "buy_price": 76460,
-    "buy_qty": 28,
-    "sell_price": 87255
-  },
-  "086280": {
-    "current_price": 168000,
-    "step": "ma5",
-    "buy_price": 158060,
-    "buy_qty": 14,
-    "sell_price": 176400
-  },
-  "290550": {
-    "current_price": 7570,
-    "step": "ma10",
-    "buy_price": 7142,
-    "buy_qty": 312,
-    "sell_price": 7948
-  },
-  "383310": {
-    "current_price": 27050,
-    "step": "ma20",
-    "buy_price": 26170,
-    "buy_qty": 87,
-    "sell_price": 28787
-  },
-  "009450": {
-    "current_price": 90400,
-    "step": "ma20",
-    "buy_price": 84565,
-    "buy_qty": 26,
-    "sell_price": 93021
-  },
-  "950140": {
-    "current_price": 15160,
-    "step": "ma20",
-    "buy_price": 14136,
-    "buy_qty": 156,
-    "sell_price": 15549
-  },
-  "012750": {
-    "current_price": 74300,
-    "step": "ma20",
-    "buy_price": 72315,
-    "buy_qty": 31,
-    "sell_price": 79546
-  },
-  "222080": {
-    "current_price": 7700,
-    "step": "ma20",
-    "buy_price": 7556,
-    "buy_qty": 307,
-    "sell_price": 8311
-  },
   "092460": {
-    "current_price": 12160,
-    "step": "ma10",
-    "buy_price": 11181,
-    "buy_qty": 194,
-    "sell_price": 12768
-  },
-  "038500": {
-    "current_price": 3420,
+    "current_price": 11860,
     "step": "ma20",
-    "buy_price": 3321,
-    "buy_qty": 692,
-    "sell_price": 3653
-  },
-  "183190": {
-    "current_price": 14290,
-    "step": "ma20",
-    "buy_price": 13111,
-    "buy_qty": 165,
-    "sell_price": 14422
-  },
-  "195940": {
-    "current_price": 46100,
-    "step": "ma20",
-    "buy_price": 43860,
-    "buy_qty": 51,
-    "sell_price": 48246
-  },
-  "100090": {
-    "current_price": 21250,
-    "step": "ma20",
-    "buy_price": 20361,
-    "buy_qty": 111,
-    "sell_price": 22397
-  },
-  "251970": {
-    "current_price": 73300,
-    "step": "ma10",
-    "buy_price": 66700,
-    "buy_qty": 32,
-    "sell_price": 76965
-  },
-  "009150": {
-    "current_price": 160100,
-    "step": "ma10",
-    "buy_price": 149680,
-    "buy_qty": 14,
-    "sell_price": 168105
-  },
-  "004800": {
-    "current_price": 88000,
-    "step": "ma20",
-    "buy_price": 81780,
-    "buy_qty": 26,
-    "sell_price": 89958
-  },
-  "041830": {
-    "current_price": 28500,
-    "step": "ma10",
-    "buy_price": 25585,
-    "buy_qty": 83,
-    "sell_price": 29925
-  },
-  "214450": {
-    "current_price": 664000,
-    "step": "ma5",
-    "buy_price": 597800,
-    "buy_qty": 3,
-    "sell_price": 697200
-  },
-  "082920": {
-    "current_price": 33450,
-    "step": "ma10",
-    "buy_price": 31665,
-    "buy_qty": 70,
-    "sell_price": 35122
-  },
-  "017960": {
-    "current_price": 32000,
-    "step": "ma20",
-    "buy_price": 28168,
-    "buy_qty": 73,
-    "sell_price": 30984
-  },
-  "230360": {
-    "current_price": 11140,
-    "step": "ma20",
-    "buy_price": 10458,
-    "buy_qty": 212,
-    "sell_price": 11503
-  },
-  "101930": {
-    "current_price": 49100,
-    "step": "ma5",
-    "buy_price": 44290,
-    "buy_qty": 48,
-    "sell_price": 51555
-  },
-  "069260": {
-    "current_price": 18100,
-    "step": "ma20",
-    "buy_price": 17722,
-    "buy_qty": 130,
-    "sell_price": 19494
-  },
-  "062040": {
-    "current_price": 119200,
-    "step": "ma20",
-    "buy_price": 107780,
-    "buy_qty": 19,
-    "sell_price": 118558
-  },
-  "083930": {
-    "current_price": 13230,
-    "step": "ma20",
-    "buy_price": 13177,
-    "buy_qty": 178,
-    "sell_price": 14494
-  },
-  "281820": {
-    "current_price": 32950,
-    "step": "ma5",
-    "buy_price": 30890,
-    "buy_qty": 71,
-    "sell_price": 34597
-  },
-  "014940": {
-    "current_price": 8140,
-    "step": "ma5",
-    "buy_price": 6938,
-    "buy_qty": 290,
-    "sell_price": 8547
-  },
-  "054950": {
-    "current_price": 28000,
-    "step": "ma20",
-    "buy_price": 26830,
-    "buy_qty": 84,
-    "sell_price": 29513
-  },
-  "097520": {
-    "current_price": 29350,
-    "step": "ma20",
-    "buy_price": 28752,
-    "buy_qty": 80,
-    "sell_price": 31627
-  },
-  "372170": {
-    "current_price": 32850,
-    "step": "ma20",
-    "buy_price": 31288,
-    "buy_qty": 72,
-    "sell_price": 34416
+    "buy_price": 10898,
+    "buy_qty": 303,
+    "sell_price": 11987
   },
   "090460": {
-    "current_price": 15310,
+    "current_price": 17000,
+    "step": "ma10",
+    "buy_price": 15596,
+    "buy_qty": 211,
+    "sell_price": 17850
+  },
+  "194480": {
+    "current_price": 44850,
     "step": "ma20",
-    "buy_price": 14594,
-    "buy_qty": 154,
-    "sell_price": 16053
+    "buy_price": 44655,
+    "buy_qty": 80,
+    "sell_price": 49120
+  },
+  "319660": {
+    "current_price": 21550,
+    "step": "ma20",
+    "buy_price": 20446,
+    "buy_qty": 167,
+    "sell_price": 22490
+  },
+  "230360": {
+    "current_price": 15020,
+    "step": "ma5",
+    "buy_price": 13556,
+    "buy_qty": 239,
+    "sell_price": 15771
+  },
+  "044490": {
+    "current_price": 42300,
+    "step": "ma20",
+    "buy_price": 40280,
+    "buy_qty": 85,
+    "sell_price": 44308
+  },
+  "036890": {
+    "current_price": 12600,
+    "step": "ma20",
+    "buy_price": 12014,
+    "buy_qty": 285,
+    "sell_price": 13215
+  },
+  "100840": {
+    "current_price": 50900,
+    "step": "ma20",
+    "buy_price": 47895,
+    "buy_qty": 70,
+    "sell_price": 52684
+  },
+  "005070": {
+    "current_price": 49200,
+    "step": "ma5",
+    "buy_price": 46540,
+    "buy_qty": 73,
+    "sell_price": 51660
+  },
+  "108380": {
+    "current_price": 26000,
+    "step": "ma20",
+    "buy_price": 26090,
+    "buy_qty": 138,
+    "sell_price": 28699
+  },
+  "009450": {
+    "current_price": 80600,
+    "step": "ma20",
+    "buy_price": 86775,
+    "buy_qty": 44,
+    "sell_price": 95452
+  },
+  "131970": {
+    "current_price": 35500,
+    "step": "ma20",
+    "buy_price": 32038,
+    "buy_qty": 101,
+    "sell_price": 35241
+  },
+  "323280": {
+    "current_price": 30400,
+    "step": "ma20",
+    "buy_price": 31040,
+    "buy_qty": 118,
+    "sell_price": 34144
+  },
+  "000270": {
+    "current_price": 104100,
+    "step": "ma20",
+    "buy_price": 102860,
+    "buy_qty": 34,
+    "sell_price": 113146
+  },
+  "004800": {
+    "current_price": 89600,
+    "step": "ma20",
+    "buy_price": 83500,
+    "buy_qty": 40,
+    "sell_price": 91850
+  },
+  "077360": {
+    "current_price": 4695,
+    "step": "ma20",
+    "buy_price": 4532,
+    "buy_qty": 766,
+    "sell_price": 4985
+  },
+  "357780": {
+    "current_price": 241500,
+    "step": "ma20",
+    "buy_price": 225600,
+    "buy_qty": 14,
+    "sell_price": 248160
   },
   "267270": {
-    "current_price": 104400,
+    "current_price": 101200,
+    "step": "ma20",
+    "buy_price": 93480,
+    "buy_qty": 35,
+    "sell_price": 102828
+  },
+  "102710": {
+    "current_price": 42400,
+    "step": "ma20",
+    "buy_price": 40730,
+    "buy_qty": 84,
+    "sell_price": 44803
+  },
+  "051360": {
+    "current_price": 17030,
+    "step": "ma20",
+    "buy_price": 16618,
+    "buy_qty": 211,
+    "sell_price": 18279
+  },
+  "097520": {
+    "current_price": 29750,
+    "step": "ma20",
+    "buy_price": 29110,
+    "buy_qty": 121,
+    "sell_price": 32021
+  },
+  "101670": {
+    "current_price": 3130,
     "step": "ma10",
-    "buy_price": 96390,
-    "buy_qty": 22,
-    "sell_price": 109620
+    "buy_price": 2697,
+    "buy_qty": 1150,
+    "sell_price": 3286
+  },
+  "034230": {
+    "current_price": 20950,
+    "step": "ma20",
+    "buy_price": 19328,
+    "buy_qty": 171,
+    "sell_price": 21260
+  },
+  "082920": {
+    "current_price": 31600,
+    "step": "ma20",
+    "buy_price": 31500,
+    "buy_qty": 113,
+    "sell_price": 34650
+  },
+  "372170": {
+    "current_price": 35000,
+    "step": "ma10",
+    "buy_price": 32925,
+    "buy_qty": 102,
+    "sell_price": 36750
+  },
+  "290550": {
+    "current_price": 7910,
+    "step": "ma20",
+    "buy_price": 7266,
+    "buy_qty": 455,
+    "sell_price": 7992
+  },
+  "383310": {
+    "current_price": 27500,
+    "step": "ma20",
+    "buy_price": 26582,
+    "buy_qty": 130,
+    "sell_price": 29240
+  },
+  "017960": {
+    "current_price": 30300,
+    "step": "ma20",
+    "buy_price": 29480,
+    "buy_qty": 118,
+    "sell_price": 32428
+  },
+  "041830": {
+    "current_price": 29300,
+    "step": "ma10",
+    "buy_price": 27455,
+    "buy_qty": 122,
+    "sell_price": 30765
+  },
+  "017510": {
+    "current_price": 11445,
+    "step": "ma10",
+    "buy_price": 9490,
+    "buy_qty": 314,
+    "sell_price": 12017
+  },
+  "038500": {
+    "current_price": 3325,
+    "step": "ma20",
+    "buy_price": 3341,
+    "buy_qty": 1082,
+    "sell_price": 3675
+  },
+  "005930": {
+    "current_price": 71350,
+    "step": "ma20",
+    "buy_price": 69458,
+    "buy_qty": 50,
+    "sell_price": 76403
+  },
+  "101930": {
+    "current_price": 45000,
+    "step": "ma20",
+    "buy_price": 40230,
+    "buy_qty": 80,
+    "sell_price": 44253
   },
   "460930": {
-    "current_price": 22100,
+    "current_price": 21650,
+    "step": "ma20",
+    "buy_price": 20372,
+    "buy_qty": 166,
+    "sell_price": 22409
+  },
+  "069260": {
+    "current_price": 17850,
+    "step": "ma20",
+    "buy_price": 17850,
+    "buy_qty": 201,
+    "sell_price": 19635
+  },
+  "036830": {
+    "current_price": 47200,
+    "step": "ma20",
+    "buy_price": 44195,
+    "buy_qty": 76,
+    "sell_price": 48614
+  },
+  "278470": {
+    "current_price": 215500,
+    "step": "ma20",
+    "buy_price": 190865,
+    "buy_qty": 16,
+    "sell_price": 209951
+  },
+  "281820": {
+    "current_price": 34900,
+    "step": "ma10",
+    "buy_price": 31990,
+    "buy_qty": 103,
+    "sell_price": 36645
+  },
+  "143160": {
+    "current_price": 17360,
+    "step": "ma20",
+    "buy_price": 16876,
+    "buy_qty": 207,
+    "sell_price": 18563
+  },
+  "214450": {
+    "current_price": 686000,
+    "step": "ma10",
+    "buy_price": 624000,
+    "buy_qty": 5,
+    "sell_price": 720300
+  },
+  "084370": {
+    "current_price": 50800,
     "step": "ma5",
-    "buy_price": 20900,
-    "buy_qty": 107,
-    "sell_price": 23205
+    "buy_price": 47760,
+    "buy_qty": 70,
+    "sell_price": 53340
+  },
+  "036560": {
+    "current_price": 15570,
+    "step": "ma20",
+    "buy_price": 14200,
+    "buy_qty": 231,
+    "sell_price": 15620
+  },
+  "300720": {
+    "current_price": 19710,
+    "step": "ma20",
+    "buy_price": 19824,
+    "buy_qty": 182,
+    "sell_price": 21806
+  },
+  "014940": {
+    "current_price": 7120,
+    "step": "ma20",
+    "buy_price": 6362,
+    "buy_qty": 505,
+    "sell_price": 6998
+  },
+  "101490": {
+    "current_price": 53500,
+    "step": "ma20",
+    "buy_price": 49752,
+    "buy_qty": 67,
+    "sell_price": 54727
+  },
+  "009150": {
+    "current_price": 162100,
+    "step": "ma20",
+    "buy_price": 147790,
+    "buy_qty": 22,
+    "sell_price": 162569
+  },
+  "098070": {
+    "current_price": 39450,
+    "step": "ma10",
+    "buy_price": 37460,
+    "buy_qty": 91,
+    "sell_price": 41422
+  },
+  "073010": {
+    "current_price": 5480,
+    "step": "ma10",
+    "buy_price": 5054,
+    "buy_qty": 657,
+    "sell_price": 5754
+  },
+  "086280": {
+    "current_price": 177700,
+    "step": "ma10",
+    "buy_price": 162190,
+    "buy_qty": 20,
+    "sell_price": 186585
+  },
+  "251970": {
+    "current_price": 67500,
+    "step": "ma20",
+    "buy_price": 65415,
+    "buy_qty": 53,
+    "sell_price": 71956
+  },
+  "098120": {
+    "current_price": 23350,
+    "step": "ma10",
+    "buy_price": 22015,
+    "buy_qty": 154,
+    "sell_price": 24517
+  },
+  "123860": {
+    "current_price": 19060,
+    "step": "ma20",
+    "buy_price": 18665,
+    "buy_qty": 188,
+    "sell_price": 20531
+  },
+  "071970": {
+    "current_price": 80600,
+    "step": "ma20",
+    "buy_price": 68850,
+    "buy_qty": 44,
+    "sell_price": 75735
+  },
+  "012750": {
+    "current_price": 74900,
+    "step": "ma20",
+    "buy_price": 73020,
+    "buy_qty": 48,
+    "sell_price": 80322
+  },
+  "104830": {
+    "current_price": 25250,
+    "step": "ma10",
+    "buy_price": 23250,
+    "buy_qty": 142,
+    "sell_price": 26512
   }
 }

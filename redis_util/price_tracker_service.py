@@ -246,7 +246,7 @@ class PriceTracker:
                             logger.debug(f"📈 최고가 갱신 - 종목: {stock_code}, {highest_price} -> {current_price}")
                         
                         # 최저가 갱신
-                        if current_price < lowest_price:
+                        if current_price < lowest_price or lowest_price == 0:
                             update_fields["lowest_price"] = str(current_price)
                             logger.debug(f"📉 최저가 갱신 - 종목: {stock_code}, {lowest_price} -> {current_price}")
             

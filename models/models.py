@@ -34,7 +34,7 @@ class BaseLine(SQLModel, table=True):
     class Config:
         """SQLModel 설정"""
         # 종목코드와 step의 조합이 유니크해야 함
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "stock_code": "005930",
                 "step": 0,
@@ -116,7 +116,7 @@ class StepManager(SQLModel, table=True):
     
     class Config:
         """SQLModel 설정"""
-        schema_extra = {
+        json_schema_extra= {
             "example": {
                 "code": "005930",
                 "type": True,
